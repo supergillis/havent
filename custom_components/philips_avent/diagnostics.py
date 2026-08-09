@@ -10,8 +10,8 @@ from .const import DOMAIN
 
 REDACT_KEYS = {
     "sid", "ecode", "uid", "partner_identity", "localKey", "local_key", "password", "email",
-    # Anyone holding this can watch the camera from the player page.
-    "player_token",
+    # Anyone holding this can open a camera session against the signaling endpoint.
+    "stream_token",
 }
 
 
