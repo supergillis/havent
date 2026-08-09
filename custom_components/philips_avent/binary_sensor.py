@@ -43,30 +43,34 @@ async def async_setup_entry(
             AventLullabyPlaying(coordinator, cam_id),
             AventMotionDetected(coordinator, cam_id),
             AventSoundDetected(coordinator, cam_id),
-            AventSenseIQSignalLost(coordinator, cam_id),
+            AventSenseIQSignalFlag(coordinator, cam_id),
         ])
     async_add_entities(entities)
 
 
-class AventSenseIQSignalLost(CoordinatorEntity, BinarySensorEntity):
-    """Whether the monitor currently reports no SenseIQ signal (DPS 15).
+class AventSenseIQSignalFlag(CoordinatorEntity, BinarySensorEntity):
+    """The raw DPS 15 `no_senseiq_signal` flag, relayed without interpretation.
 
-    A plain read-only bool named `no_senseiq_signal` in the device schema, so
-    True is reported directly as "signal lost" with no inversion. What losing
-    the signal implies about the room (baby out of the crib, view blocked) is
-    left to the user; the entity only relays the device's own flag.
+    The schema names it "No SenseIQ signal" and it pairs with the DPS 13
+    no-signal alert switch, but its polarity is unproven: it read `True` on a
+    healthy monitor that was reporting a live breathing rate at the same
+    moment, and no public source says which way round it means. So this is
+    deliberately NOT a `problem` sensor — shipping it as one cried wolf
+    permanently — and it carries no device class at all. It stays as a
+    diagnostic entity because it is the raw evidence: the day it is seen to
+    flip against a known room state, the polarity is pinned and this can
+    become a real signal. Until then, do not automate on it.
     """
 
     _attr_has_entity_name = True
-    _attr_name = "SenseIQ Signal Lost"
-    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_name = "SenseIQ No-Signal Flag"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:sleep-off"
 
     def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
         super().__init__(coordinator)
         self._cam_id = cam_id
-        self._attr_unique_id = f"{cam_id}_senseiq_signal_lost"
+        self._attr_unique_id = f"{cam_id}_no_senseiq_signal"
         self._attr_device_info = build_device_info(coordinator, cam_id)
 
     @property

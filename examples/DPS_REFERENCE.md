@@ -33,7 +33,7 @@ poll and LAN push as everything else. Schema read from a live SCD953
 |----|------|------|------|------|-------------|
 | 1 | `sleepiq_switch` | SenseIQ on/off | bool | rw | true/false |
 | 2 | `cry_trans_switch` | Cry translation on/off | bool | rw | true/false (subscription feature) |
-| 3 | `sleepiq_status` | Live SenseIQ status | string | ro | JSON, e.g. `{"r":"b","br":29}` — `br` = breathing rate in breaths/min (**confirmed**); `r` **unknown**, not the sleep state |
+| 3 | `sleepiq_status` | Live SenseIQ status | string | ro | JSON, e.g. `{"r":"b","br":29}` — `br` = breathing rate in breaths/min (**confirmed**); `r` = live sensing status, `b`=breathing (**documented**), NOT the sleep stage |
 | 4 | `sleep_session_data` | Current sleep session | raw | ro | base64(hex(JSON)): `{"st":<epoch>,"sd":<s>,"css":"d","cssd":<s>,"ssd":[{"l":302}]}`; `sd = Σssd + cssd`; `css` = sleep state |
 | 5 | `sleepiq_consent` | SenseIQ consent | bool | rw | GDPR consent flag |
 | 6 | `senseiq_diagnostics` | SenseIQ diagnostics | raw | ro | opaque |
@@ -45,7 +45,7 @@ poll and LAN push as everything else. Schema read from a live SCD953
 | 12 | `cry_det_switch` | Cry alert on/off | bool | rw | true/false |
 | 13 | `no_senseiq_switch` | No-signal alert on/off | bool | rw | true/false |
 | 14 | `cry_trans_subscr` | Cry translation subscription | string | rw | JSON with `days_left`, `status`, `type` |
-| 15 | `no_senseiq_signal` | No SenseIQ signal | bool | ro | true = monitor reports no signal |
+| 15 | `no_senseiq_signal` | No SenseIQ signal | bool | ro | no-signal indicator (pairs with DP 13 alert). Observed `true` on a healthy monitor; polarity not confirmed by any public source — do not surface as a `problem` sensor yet |
 | 16 | `refurbish_counter` | Refurbishment counter | value | ro | 0–1000 |
 | 17 | `cry_trans_token` | Cry translation token | raw | rw | cloud auth blob |
 | 18 | `device_errors` | Errors | bitmap | ro | fault bitmap |
@@ -62,11 +62,20 @@ are the difference between evidence and a guess:
 | DPS 3 `br` | number | breathing rate, breaths per minute (27, 28, 30, 33 all matched the app) | **confirmed** |
 | DPS 4 `css` | `d` | deep sleep (app showed "deep sleep" at the same moment) | **confirmed** |
 | DPS 4 `css` / `ssd` keys | `l` | light sleep — the `ssd` segments alternate `l`/`d` exactly as sleep cycles do | *inferred* |
-| DPS 3 `r` | `"b"` | **not** the sleep state: held `"b"` for an hour while `css` changed; best guess "baby detected" | **unknown** |
+| DPS 4 `css` awake | letter unknown | the app's third sleep stage is **active-awake**; its `css` code has never been seen here, so it stays unmapped | **documented, not observed** |
+| DPS 3 `r` | `"b"` | **live sensing status, not the sleep stage.** APK strings enumerate the set as *moving / breathing / no-signal / out-of-crib / analyzing*; `b` = breathing. It held `b` for an hour because the baby breathed throughout while the DPS 4 `css` stage cycled | **documented** |
 
-The integration translates only the confirmed/inferred codes (`d` → deep,
-`l` → light); anything else reads unknown, and `r` is relayed verbatim on a
-diagnostic entity rather than interpreted.
+The integration translates only the pinned codes: DPS 4 `css` `d` → deep and
+`l` → light, DPS 3 `r` `b` → breathing; anything else — including the awake
+stage code and the four unobserved status letters — reads unknown, with the
+raw letter kept on the entity's attributes as evidence. DP 11/12/13 are plain
+alert switches, and DP 15 is relayed as a raw diagnostic flag with no problem
+semantics until its polarity is proven. The `r`
+status set, the three sleep stages (active-awake / light / deep) and DP 13/15's
+roles are documented in a public static RE of the same Philips Baby Monitor+ APK
+(github.com/eisbaw/babymonitor-client) and Philips' support pages; the exact
+`css`/`r` letter encodings are not — only the human labels — so the awake letter
+is still unproven.
 
 ### Video & Image
 
@@ -127,7 +136,7 @@ diagnostic entity rather than interpreted.
 | 139 | `decibel_switch` | Sound detection on/off | bool | rw | true/false |
 | 140 | `decibel_sensitivity` | Sound sensitivity | enum | rw | `0` (off), `1` (low), `2` (high) |
 | 141 | `decibel_upload` | Sound event (read-only) | string | ro | `decibel_upload` when triggered |
-| 212 | `initiative_message` | Alarm record with snapshot pointer | raw | rw | base64 JSON: `{"cmd":"ipc_motion","alarm":true,"time":...,"files":[...]}`; one slot holding the newest alarm |
+| 212 | `initiative_message` | Alarm record with snapshot pointer | raw | rw | base64 JSON: `{"cmd":"ipc_motion","alarm":true,"time":...,"files":[...]}`; one slot holding the newest alarm. `cmd` is a reused Tuya code: `ipc_motion`/`ipc_bang`/`ipc_cry` are real alerts, but `ipc_custom` is the cry-translation result "baby needs to burp" (Zoundream), not a motion/sound event |
 | 239 | `monitor_sensitivity` | Background monitoring | enum | rw | `0`, `1`, `2`, `3` |
 
 ### Two-Way Audio

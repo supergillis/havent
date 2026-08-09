@@ -11,7 +11,6 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-    EntityCategory,
     UnitOfTemperature,
     UnitOfTime,
 )
@@ -23,15 +22,16 @@ from .const import DOMAIN, DPS_SENSEIQ_STATUS, DPS_SLEEP_SESSION, DPS_TEMPERATUR
 from .coordinator import PhilipsAventCoordinator
 from .entity import build_device_info
 from .senseiq import (
+    SENSING_STATUSES,
     SLEEP_STATES,
     breathing_rate,
     decode_senseiq_payload,
+    sensing_status,
     session_attributes,
     session_duration,
     session_start,
     sleep_state,
     status_attributes,
-    status_code,
 )
 
 
@@ -45,7 +45,7 @@ async def async_setup_entry(
         entities.append(AventWifiSignalSensor(coordinator, cam_id))
         entities.append(AventSleepStateSensor(coordinator, cam_id))
         entities.append(AventBreathingRateSensor(coordinator, cam_id))
-        entities.append(AventSenseIQStatusSensor(coordinator, cam_id))
+        entities.append(AventSensingStatusSensor(coordinator, cam_id))
         entities.append(AventSleepSessionStartSensor(coordinator, cam_id))
         entities.append(AventSleepSessionDurationSensor(coordinator, cam_id))
     async_add_entities(entities)
@@ -163,28 +163,34 @@ class AventBreathingRateSensor(CoordinatorEntity, SensorEntity):
         return breathing_rate(decode_senseiq_payload(dps.get(DPS_SENSEIQ_STATUS)))
 
 
-class AventSenseIQStatusSensor(CoordinatorEntity, SensorEntity):
-    """The raw `r` letter code of the DPS 3 status payload. Diagnostic.
+class AventSensingStatusSensor(CoordinatorEntity, SensorEntity):
+    """What SenseIQ is currently sensing (DPS 3 `r`), translated.
 
-    What we know: `r` is NOT the sleep state — it read "b" across an hour of
-    samples while the sleep state (DPS 4 `css`) changed underneath it. What we
-    do not know: what "b" means; best guess "baby detected", unverified. Kept
-    as a diagnostic entity because it is the raw evidence a future decoding
-    needs, but it must not sit among the useful entities, and nothing should
-    automate on it. The rest of the payload rides along as attributes
-    verbatim, `br` included, even though breathing rate is now a first-class
-    sensor — the attribute is the untouched record.
+    The live sensing status — a different axis from the Sleep State sensor's
+    DPS 4 stage: this says what the camera reads off the crib right now, not
+    how deeply the baby sleeps. The documented value set (APK strings of the
+    same Baby Monitor+ app, github.com/eisbaw/babymonitor-client) is moving /
+    breathing / no-signal / out-of-crib / analyzing; only `b` = "breathing"
+    is pinned to a letter so far — documented, and consistent with every live
+    sample, which held `b` for an hour while the stage cycled. It is a real
+    signal, not a diagnostic, so it sits with the other sensors. Same strict
+    ENUM discipline as Sleep State: an unobserved code reads unknown —
+    senseiq.sensing_status returns None, which HA passes through before the
+    options check — rather than leaking a letter as a state. The raw code
+    (`status_code`) and the rest of the payload ride along as attributes, so
+    the day another letter shows up it is caught, not lost.
     """
 
     _attr_has_entity_name = True
-    _attr_name = "SenseIQ Status"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:code-json"
+    _attr_name = "Sensing Status"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = SENSING_STATUSES
+    _attr_icon = "mdi:radar"
 
     def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
         super().__init__(coordinator)
         self._cam_id = cam_id
-        self._attr_unique_id = f"{cam_id}_senseiq_status"
+        self._attr_unique_id = f"{cam_id}_sensing_status"
         self._attr_device_info = build_device_info(coordinator, cam_id)
 
     @property
@@ -194,7 +200,7 @@ class AventSenseIQStatusSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        return status_code(self._payload)
+        return sensing_status(self._payload)
 
     @property
     def extra_state_attributes(self) -> dict:

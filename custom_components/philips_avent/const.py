@@ -50,6 +50,12 @@ DEFAULT_MODEL = "Avent Baby Monitor"
 DPS_SENSEIQ_SWITCH = "1"
 DPS_SENSEIQ_STATUS = "3"
 DPS_SLEEP_SESSION = "4"
+# The three SenseIQ alert toggles: plain rw bools per the device schema
+# (`awake_switch`, `cry_det_switch`, `no_senseiq_switch`). DPS 13 pairs with
+# the DPS 15 no-signal flag the way DPS 134/139 pair with their events.
+DPS_AWAKE_ALERT_SWITCH = "11"
+DPS_CRY_ALERT_SWITCH = "12"
+DPS_NO_SIGNAL_ALERT_SWITCH = "13"
 DPS_NO_SENSEIQ_SIGNAL = "15"
 DPS_NIGHT_LIGHT = "138"
 DPS_BRIGHTNESS = "158"

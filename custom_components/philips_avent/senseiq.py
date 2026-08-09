@@ -7,10 +7,16 @@ as the temperature. The two that carry the actual signal:
 - DPS 3 `sleepiq_status`, a plain JSON string with the instantaneous reading,
   e.g. `{"r":"b","br":29}` (live SCD953, 2026-08-09). `br` is the breathing
   rate in breaths per minute — **confirmed** by comparing against the Philips
-  app's own reading (27, 28, 30, 33 observed, all matching). `r` is NOT the
-  sleep state: it read `"b"` across an hour of samples while the sleep state
-  changed underneath it. Its meaning is unknown (best guess "baby detected"),
-  so it is relayed verbatim, never interpreted.
+  app's own reading (27, 28, 30, 33 observed, all matching). `r` is the live
+  *sensing status* — a different axis from the DPS 4 sleep *stage*. APK
+  strings enumerate its value set as moving / breathing / no-signal /
+  out-of-crib / analyzing (**documented** in a public static RE of the same
+  Baby Monitor+ app, github.com/eisbaw/babymonitor-client), and `b` =
+  breathing — documented, and consistent with every live sample: it held
+  `"b"` across an hour in which the baby breathed throughout, while the
+  sleep stage (DPS 4 `css`) cycled underneath. Only that one letter is
+  pinned; the other codes have never been observed here, so they translate
+  to None (unknown), never to a guessed label.
 - DPS 4 `sleep_session_data`, the session in progress. The camera double-wraps
   it: base64 of the ASCII hex of the JSON, e.g.
   `{"st":1786297106,"sd":1864,"css":"d","cssd":1562,"ssd":[{"l":302}]}`.
@@ -57,6 +63,23 @@ SLEEP_STATE_CODES = {
 # `options`: HA rejects any state outside this list, which is exactly the
 # safety property wanted here — an unmapped code becomes unknown, not a state.
 SLEEP_STATES = [SLEEP_STATE_DEEP, SLEEP_STATE_LIGHT]
+
+SENSING_STATUS_BREATHING = "breathing"
+
+# The decoded sensing-status vocabulary for DPS 3 `r`. The documented value
+# set is moving / breathing / no-signal / out-of-crib / analyzing (APK
+# strings, `bm_sleepIQ_pricacy_explain_content`), but only `b` = breathing is
+# pinned to a letter so far. The unobserved letters stay unmapped on purpose
+# and translate to None; the future labels are expected to be `moving`,
+# `no_signal`, `out_of_crib` and `analyzing`, so an observation slots in as
+# one dict entry plus one options entry.
+SENSING_STATUS_CODES = {
+    "b": SENSING_STATUS_BREATHING,
+}
+
+# The closed set of translated statuses, for the ENUM sensor's `options` —
+# same safety property as SLEEP_STATES: an unmapped code becomes unknown.
+SENSING_STATUSES = [SENSING_STATUS_BREATHING]
 
 
 def decode_senseiq_payload(raw: object) -> dict | None:
@@ -155,9 +178,10 @@ def breathing_rate(payload: dict | None) -> float | None:
 def status_code(payload: dict | None) -> str | None:
     """The raw `r` letter code of a DPS 3 status payload, or None.
 
-    NOT the sleep state — it read "b" for an hour while the sleep state (DPS 4
-    `css`) changed underneath it. Meaning unknown; relayed verbatim as
-    evidence, never translated.
+    The untranslated letter, kept verbatim as evidence on the sensing-status
+    sensor's attributes — this is how a future unobserved code (moving,
+    no-signal, out-of-crib, analyzing) gets caught and mapped. Interpretation
+    lives in sensing_status, not here.
     """
     if not payload:
         return None
@@ -167,11 +191,39 @@ def status_code(payload: dict | None) -> str | None:
     return None
 
 
+def sensing_status(payload: dict | None) -> str | None:
+    """The live sensing status of a DPS 3 payload (`r`), translated.
+
+    A different axis from the DPS 4 sleep stage: it says what SenseIQ is
+    currently reading off the crib, not how deeply the baby sleeps. The
+    documented value set is moving / breathing / no-signal / out-of-crib /
+    analyzing; only `b` = "breathing" is pinned to a letter (documented, and
+    consistent with every live sample). Anything else — missing, non-string,
+    or an unobserved code — is None, never the raw letter: the caller exposes
+    this as an ENUM state, and HA returns early on None but rejects any state
+    outside `options`, so an unmapped code must read unknown, not leak.
+    """
+    code = status_code(payload)
+    if code is None:
+        return None
+    return SENSING_STATUS_CODES.get(code)
+
+
 def status_attributes(payload: dict | None) -> dict:
-    """Everything a DPS 3 payload carries besides the state code, verbatim."""
+    """Attributes for the sensing-status sensor: the raw code plus the rest.
+
+    The untranslated `r` letter rides along as `status_code` even though
+    sensing_status translates it, so an unmapped code stays visible as
+    evidence instead of vanishing into an unknown state; everything else the
+    payload carries (`br` included) is relayed verbatim.
+    """
     if not payload:
         return {}
-    return {key: value for key, value in payload.items() if key != "r"}
+    attrs = {key: value for key, value in payload.items() if key != "r"}
+    code = status_code(payload)
+    if code is not None:
+        attrs["status_code"] = code
+    return attrs
 
 
 def session_attributes(payload: dict | None) -> dict:

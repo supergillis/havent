@@ -27,8 +27,11 @@ Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, provid
 | 😴 Sleep State | Sensor | Deep or light sleep (deep confirmed against the app; light inferred); unrecognised codes read unknown |
 | 🫁 Breathing Rate | Sensor | Breaths per minute, confirmed against the app's own reading |
 | 🛏️ Sleep Session | Sensors | Start time and running duration of the current sleep session |
-| 😴 SenseIQ Status | Sensor | Diagnostic; the raw `r` code of the status payload — not the sleep state, meaning unknown |
-| 📶 SenseIQ Signal Lost | Binary Sensor | Diagnostic; on while the monitor reports no SenseIQ signal |
+| 👁️ Sensing Status | Sensor | What SenseIQ currently senses; `b` → `breathing` (documented), other codes read unknown until observed |
+| 👶 Awake Alert | Switch | Baby awake alert on/off |
+| 😢 Cry Alert | Switch | Cry alert on/off |
+| 📶 No-Signal Alert | Switch | SenseIQ no-signal alert on/off |
+| 📶 SenseIQ No-Signal Flag | Binary Sensor | Diagnostic; the raw DPS 15 flag, polarity unproven (read `true` on a healthy monitor) — not a problem sensor |
 
 Multiple monitors on one Tuya account are supported: the bridge serves each camera from the same port on a distinct RTSP path derived from the camera's display name.
 
@@ -228,9 +231,12 @@ The integration uses the same Tuya Mobile SDK API as the official Philips Avent 
 | 139 | `decibel_switch` | Sound alert | on/off |
 | 237 | `privacy_switch` | Privacy mode | 0/1 |
 | 1 | `sleepiq_switch` | SenseIQ sleep tracking | on/off |
-| 3 | `sleepiq_status` | Live SenseIQ status | JSON: `br` = breathing rate (confirmed), `r` undecoded |
+| 3 | `sleepiq_status` | Live SenseIQ status | JSON: `br` = breathing rate (confirmed), `r` = sensing status, `b`=breathing (documented) |
 | 4 | `sleep_session_data` | Current sleep session | start + duration + sleep state (`d`=deep confirmed, `l`=light inferred) + timeline |
-| 15 | `no_senseiq_signal` | No SenseIQ signal | true/false |
+| 11 | `awake_switch` | Awake alert | on/off |
+| 12 | `cry_det_switch` | Cry alert | on/off |
+| 13 | `no_senseiq_switch` | No-signal alert | on/off |
+| 15 | `no_senseiq_signal` | No SenseIQ signal | true/false (polarity unproven) |
 
 Full reference: [examples/DPS_REFERENCE.md](examples/DPS_REFERENCE.md)
 

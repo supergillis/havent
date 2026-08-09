@@ -10,9 +10,11 @@ import base64
 import json
 
 from senseiq import (
+    SENSING_STATUSES,
     SLEEP_STATES,
     breathing_rate,
     decode_senseiq_payload,
+    sensing_status,
     session_attributes,
     session_duration,
     session_start,
@@ -189,24 +191,53 @@ class TestBreathingRate:
         assert breathing_rate({"br": -1}) is None
 
 
-class TestStatus:
-    def test_live_code(self):
+class TestSensingStatus:
+    def test_live_code_translates_to_breathing(self):
+        # `b` = breathing: documented in the APK strings (moving / breathing /
+        # no-signal / out-of-crib / analyzing) and consistent with every live
+        # sample — it held "b" for an hour of continuous breathing while the
+        # DPS 4 sleep stage cycled underneath.
+        assert sensing_status(decode_senseiq_payload(LIVE_STATUS)) == "breathing"
+        assert sensing_status({"r": "b"}) == "breathing"
+
+    def test_unmapped_codes_read_unknown_not_the_raw_letter(self):
+        # Only `b` is pinned to a label; the other documented statuses have
+        # never been observed here, so their letters are unknown. An unmapped
+        # code must be None — the ENUM sensor shows unknown — never the raw
+        # letter passing as a state.
+        assert sensing_status({"r": "m"}) is None
+        assert sensing_status({"r": "zz"}) is None
+        assert sensing_status({"r": "d"}) is None
+
+    def test_missing_or_bad_reads_unknown(self):
+        assert sensing_status(None) is None
+        assert sensing_status({}) is None
+        assert sensing_status({"r": ""}) is None
+        assert sensing_status({"r": 3}) is None
+
+    def test_every_translated_status_is_an_enum_option(self):
+        # The ENUM sensor's options list must cover everything sensing_status
+        # can return, or HA raises on a valid state.
+        assert sensing_status({"r": "b"}) in SENSING_STATUSES
+
+    def test_raw_code_is_kept_verbatim_for_attributes(self):
         assert status_code(decode_senseiq_payload(LIVE_STATUS)) == "b"
-
-    def test_unknown_codes_pass_through_verbatim(self):
-        # `r` is not the sleep state (it held "b" while the state changed) and
-        # its vocabulary is undecoded, so any non-empty string is relayed
-        # verbatim as evidence; interpretation is deliberately not attempted.
         assert status_code({"r": "zz"}) == "zz"
-
-    def test_missing_or_bad_code_reads_unknown(self):
         assert status_code(None) is None
         assert status_code({}) is None
         assert status_code({"r": ""}) is None
         assert status_code({"r": 3}) is None
 
-    def test_attributes_carry_the_rest_verbatim(self):
-        assert status_attributes(decode_senseiq_payload(LIVE_STATUS)) == {"br": 29}
+    def test_attributes_carry_the_raw_code_and_the_rest(self):
+        # The untranslated letter rides along as evidence, so the day an
+        # unobserved status shows up it is caught in the attributes even
+        # though the state reads unknown.
+        assert status_attributes(decode_senseiq_payload(LIVE_STATUS)) == {
+            "br": 29,
+            "status_code": "b",
+        }
+        assert status_attributes({"r": "zz", "br": 12}) == {"br": 12, "status_code": "zz"}
+        assert status_attributes({"br": 12}) == {"br": 12}
         assert status_attributes(None) == {}
 
 

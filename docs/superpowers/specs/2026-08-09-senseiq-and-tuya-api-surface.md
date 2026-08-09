@@ -16,7 +16,7 @@ temperature — pushable over the LAN protocol. The device schema names them in 
 |----:|------|------|------|-----------|------------|
 | 1 | `sleepiq_switch` | SenseIQ on/off | bool rw | master enable | switch |
 | 2 | `cry_trans_switch` | Cry translation on/off | bool rw | enables the paid cry-AI | switch |
-| 3 | `sleepiq_status` | SenseIQ status | string ro | e.g. `{"r":"b","br":33}` — `br` = **breathing rate, confirmed**; `r` **unknown** (not the sleep state) | sensor + diag |
+| 3 | `sleepiq_status` | SenseIQ status | string ro | e.g. `{"r":"b","br":33}` — `br` = **breathing rate, confirmed**; `r` = **live sensing status** (`b`=breathing), *documented*, not the sleep stage | sensors (breathing rate + sensing status) |
 | 4 | `sleep_session_data` | Sleep session data | raw ro | current session: `{"st":<start>,"sd":<dur s>,"css":"d","cssd":<state dur>,"ssd":[{"l":302}]}` — `css` = **sleep state** | sensor + attrs |
 | 5 | `sleepiq_consent` | SenseIQ consent | bool rw | GDPR consent flag | no |
 | 6 | `senseiq_diagnostics` | diagnostics | raw ro | opaque | no |
@@ -28,7 +28,7 @@ temperature — pushable over the LAN protocol. The device schema names them in 
 | 12 | `cry_det_switch` | Cry alert on/off | bool rw | — | switch |
 | 13 | `no_senseiq_switch` | No-signal alert on/off | bool rw | — | switch |
 | 14 | `cry_trans_subscr` | Cry trans subscription | string rw | `{"days_left":46,"status":"active","type":"f"}` (free trial) | sensor (diag) |
-| 15 | `no_senseiq_signal` | No SenseIQ signal | bool ro | baby not currently sensed | binary_sensor |
+| 15 | `no_senseiq_signal` | No SenseIQ signal | bool ro | no-signal indicator (pairs with DPS 13 alert). **Read `True` on a healthy device; polarity not public — do not ship as a `problem` sensor** | binary_sensor (raw diag flag, no `problem` class) |
 | 16 | `refurbish_counter` | Refurbishment counter | value ro | — | no |
 | 17 | `cry_trans_token` | Cry translation token | raw rw | cloud auth for cry-AI | no |
 | 18 | `device_errors` | Errors | bitmap ro | fault bitmap | binary_sensor (problem, diag) |
@@ -45,12 +45,21 @@ same day this spec was written) decoded most of the vocabulary:
 | DPS 3 `br` | number | breathing rate, breaths/min — app matched on every sample (27, 28, 30, 33) | **confirmed** |
 | DPS 4 `css` | `d` | deep sleep — app showed "deep sleep" at the moment `css` read `'d'` | **confirmed** |
 | DPS 4 `css` / `ssd` keys | `l` | light sleep — `ssd` alternates `l`/`d` as sleep cycles do; a real sample `[{l:302},{d:2258},{l:710},{d:286},{l:354}]` + `cssd=300` summed to `sd=4210` exactly | *inferred* |
-| DPS 3 `r` | `"b"` | **not** the sleep state: read `"b"` across an hour while the state changed underneath; best guess "baby detected" | **unknown** |
+| DPS 4 `css` awake | (letter unknown) | **the app's third stage is "active-awake"** — its `css` letter has never been seen here, so the code stays unmapped; existence of an awake stage is *documented* | **documented, not observed** |
+| DPS 3 `r` | `"b"` | **live sensing status, not the sleep stage.** APK strings enumerate the set as *moving / breathing / no-signal / out-of-crib / analyzing* (`bm_sleepIQ_pricacy_explain_content`). `b` = breathing; it held `b` for an hour because the baby breathed throughout while the *stage* (DPS 4 `css`) cycled. Other letters not yet mapped | **documented** |
 
-So the sleep state lives in DPS 4 `css`, not DPS 3 `r` — the original guess that DPS 3 was the
-"live sleep/awake signal" was wrong. Cry translation (DPS 2/9/14/17) is the one genuinely
-cloud-backed, subscription-gated piece:
+So the sleep stage lives in DPS 4 `css`, not DPS 3 `r` — the original guess that DPS 3 was the
+"live sleep/awake signal" was wrong. The app's stage vocabulary is exactly three states
+(active-awake / light sleep / deep sleep, per APK strings), which bounds `css` to three codes;
+`d` and `l` are known, the awake letter is not. Cry translation (DPS 2/9/14/17) is the one
+genuinely cloud-backed, subscription-gated piece:
 it ships audio to `aispeech.tuyaeu.com` (seen in the user-info domain map) and is a free trial here.
+
+Sources for the *documented* items above: a public static RE of the same Baby Monitor+ APK
+([github.com/eisbaw/babymonitor-client](https://github.com/eisbaw/babymonitor-client): `re/senseiq.md`,
+`re/cry_translation.md`, `re/message_center.md`) plus Philips support pages (usa.philips.com
+XC000022063, XC000021724). That RE has the human labels but not the `css`/`r` letter codes, so the
+awake letter stays unproven.
 
 ## What we already use vs. what is there
 
@@ -66,7 +75,11 @@ Already used by the integration: `tuya.m.device.get` (state), `tuya.m.device.dp.
 - **Event snapshots** — DPS 212 (`initiative_message`, not "alarm_record") carries a JSON pointer to
   the JPEG the camera uploaded: bucket `ty-eu-storage30`, a file path and a per-file key. `events.py`
   already parses this. Turning the pointer into an image needs an IPC storage/signed-URL call
-  (*inferred* `tuya.m.ipc.*`); worth it for a real event thumbnail.
+  (*inferred* `tuya.m.ipc.*`); worth it for a real event thumbnail. **The `cmd:"ipc_custom"` seen
+  at 18:47 is *documented* as the cry-translation result "baby needs to burp":** the APK reuses
+  the generic code `ipc_custom` for `CryTranslationClassifyKeys.burp` (cry translation was on its
+  free trial), so it is a Zoundream cry-reason, not a motion/sound alert — `events.py` must not
+  treat it as one.
 - **Cloud storage / recording** — skill reports `cloudStorage:3`, `doorbellStorage:1`,
   `supportWebrtcRecord:true`. Timeline/clip retrieval exists but is subscription-gated and needs a
   media session, so it is outside the probing fence and out of scope here.
@@ -127,8 +140,11 @@ it on `PeerConnectionStateConnected`, we fire it on a 1.5 s timer after the answ
 ## Priorities
 
 1. **720p offer fix** — one-line mapping, biggest user-visible win, README already claims 1080p.
-2. **Sleep state sensors (DPS 3, 4) + no-signal binary sensor (DPS 15)** — the actual point of
-   SenseIQ, all live DPS already flowing through the coordinator; HA recorder gives the history.
+2. **Sleep state sensors (DPS 3, 4)** — the actual point of SenseIQ, all live DPS already flowing
+   through the coordinator; HA recorder gives the history. Expose DPS 3 `r` as the live *status*
+   (breathing/moving/…), separate from the DPS 4 sleep *stage*. **Hold the DPS 15 no-signal
+   binary sensor** until its polarity is seen to flip — it read `True` on a healthy device and no
+   public source confirms which way round it means, so shipping it as `problem` is wrong.
 3. **SenseIQ control switches (DPS 1, 11, 12, 13) and `awake_delay` number (DPS 8)** — cheap, they
    are ordinary rw DPS just like the ones already mapped.
 4. **Firmware/OTA diagnostic + `device_errors` problem sensor (DPS 18, `verSw`)** — low effort,
