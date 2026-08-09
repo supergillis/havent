@@ -12,7 +12,7 @@ import logging
 import preload as preload_mod
 from preload import StreamPreloader, describe_error
 
-NAME = "philips_avent_cam1_camera"
+NAME = "philips_avent_cam1_src"  # the producer stream holds the session
 
 
 def run(coro):
@@ -124,8 +124,8 @@ def test_repeated_answers_put_once(monkeypatch):
 
 
 def test_rearm_after_external_disable(monkeypatch):
-    """HA's provider disables preloads it did not ask for (entity register/
-    unregister, camera-prefs update); the next answer must re-arm."""
+    """A go2rtc restart silently eats preloads (the provider used to disarm
+    the _camera name too, historically); the next answer must re-arm."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     pre = StreamPreloader(hass)
@@ -168,6 +168,17 @@ def test_disable_stops_only_armed_preloads(monkeypatch):
     run(pre.async_disable(["cam1", "cam2"]))
     disables = [c for c in state.calls if c[0] == "preload.disable"]
     assert disables == [("preload.disable", NAME)]
+
+
+def test_disable_sweeps_both_names(monkeypatch):
+    """An upgrade may leave a _camera preload armed by an older version;
+    disabling must stop it too, or go2rtc streams for nobody."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.preloads["philips_avent_cam1_camera"] = {}
+    state.preloads["philips_avent_cam1_src"] = {}
+    run(StreamPreloader(hass).async_disable(["cam1"]))
+    assert state.preloads == {}
 
 
 # -- degradation -----------------------------------------------------------

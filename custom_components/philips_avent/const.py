@@ -168,8 +168,10 @@ CONF_STREAM_TOKEN = "stream_token"
 # is watching — for instant stream opens and zero Tuya session churn, the
 # same one-long-lived-session behaviour the Go bridge has always had. Only
 # meaningful on the builtin backend. Driven through go2rtc's own preload
-# API, NOT Home Assistant's `preload_stream` camera preference, which would
-# feed our webrtc: URL to ffmpeg/HLS (see preload.py for the full why).
+# API against the producer stream, NOT Home Assistant's `preload_stream`
+# camera preference: that is another integration's user preference, and it
+# would arm the provider's `_camera` stream instead of the producer that
+# holds the Tuya session (see preload.py for the full why).
 CONF_KEEP_STREAM_RUNNING = "keep_stream_running"
 DEFAULT_KEEP_STREAM_RUNNING = False
 
