@@ -14,6 +14,7 @@ from .const import (
     DPS_MOTION_SWITCH,
     DPS_NIGHT_LIGHT,
     DPS_PRIVACY_MODE,
+    DPS_SENSEIQ_SWITCH,
     DPS_SOUND_SWITCH,
 )
 from .coordinator import PhilipsAventCoordinator
@@ -30,6 +31,10 @@ async def async_setup_entry(
             AventSwitch(coordinator, cam_id, DPS_NIGHT_LIGHT, "Night Light", "mdi:lightbulb-night"),
             AventSwitch(coordinator, cam_id, DPS_MOTION_SWITCH, "Motion Alert", "mdi:motion-sensor"),
             AventSwitch(coordinator, cam_id, DPS_SOUND_SWITCH, "Sound Alert", "mdi:ear-hearing"),
+            # SenseIQ master enable, DPS 1 `sleepiq_switch`: an ordinary rw
+            # bool like the alert switches above (observed True on live
+            # hardware), mirroring the on/off the Philips app exposes.
+            AventSwitch(coordinator, cam_id, DPS_SENSEIQ_SWITCH, "SenseIQ", "mdi:sleep"),
             AventEnumSwitch(coordinator, cam_id, DPS_PRIVACY_MODE, "Privacy Mode", "mdi:eye-off"),
         ])
     async_add_entities(entities)

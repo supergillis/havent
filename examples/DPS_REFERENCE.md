@@ -22,6 +22,41 @@ client.set_dps("YOUR_DEVICE_ID", {"201": "play"})   # play lullaby
 
 ## Complete DPS Map
 
+### SenseIQ Sleep Tracking (DPS 1–21)
+
+SenseIQ is not a separate Philips service: it is this block of ordinary Tuya
+data points on the low id range, delivered through the same `tuya.m.device.get`
+poll and LAN push as everything else. Schema read from a live SCD953
+(firmware 1.4.0, 2026-08-09):
+
+| ID | Code | Name | Type | Mode | Values/Range |
+|----|------|------|------|------|-------------|
+| 1 | `sleepiq_switch` | SenseIQ on/off | bool | rw | true/false |
+| 2 | `cry_trans_switch` | Cry translation on/off | bool | rw | true/false (subscription feature) |
+| 3 | `sleepiq_status` | Live SenseIQ status | string | ro | JSON, e.g. `{"r":"b","br":29}` — letter code undecoded |
+| 4 | `sleep_session_data` | Current sleep session | raw | ro | base64(hex(JSON)): `{"st":<epoch>,"sd":<s>,"css":"d","cssd":<s>,"ssd":[{"l":302}]}`; `sd = Σssd + cssd` |
+| 5 | `sleepiq_consent` | SenseIQ consent | bool | rw | GDPR consent flag |
+| 6 | `senseiq_diagnostics` | SenseIQ diagnostics | raw | ro | opaque |
+| 7 | `sensiq_diag_consent` | Diagnostics consent | bool | rw | true/false |
+| 8 | `awake_delay` | Baby awake time delay | value | rw | 0–3600 s |
+| 9 | `cry_trans_result` | Cry translation result | enum | ro | `0`–`8` (subscription feature) |
+| 10 | `sleepiq_area` | Detection area | string | rw | JSON: `{"num":1,"region0":{...}}` |
+| 11 | `awake_switch` | Baby awake alert on/off | bool | rw | true/false |
+| 12 | `cry_det_switch` | Cry alert on/off | bool | rw | true/false |
+| 13 | `no_senseiq_switch` | No-signal alert on/off | bool | rw | true/false |
+| 14 | `cry_trans_subscr` | Cry translation subscription | string | rw | JSON with `days_left`, `status`, `type` |
+| 15 | `no_senseiq_signal` | No SenseIQ signal | bool | ro | true = monitor reports no signal |
+| 16 | `refurbish_counter` | Refurbishment counter | value | ro | 0–1000 |
+| 17 | `cry_trans_token` | Cry translation token | raw | rw | cloud auth blob |
+| 18 | `device_errors` | Errors | bitmap | ro | fault bitmap |
+| 19 | `bu_logs` | Base unit logs | raw | ro | base64(hex(JSON)) |
+| 20 | `pu_logs` | Parent unit logs | raw | ro | base64(hex(JSON)) |
+| 21 | `ext_functions` | Extended functions | value | rw | feature bitmask |
+
+The letter codes in DPS 3 (`r`) and DPS 4 (`css`, `ssd` entry keys) are the
+device's own sleep-state vocabulary and have not been decoded; the integration
+relays them verbatim rather than guessing at asleep/awake.
+
 ### Video & Image
 
 | ID | Code | Name | Type | Mode | Values/Range |
@@ -48,7 +83,7 @@ client.set_dps("YOUR_DEVICE_ID", {"201": "play"})   # play lullaby
 | 201 | `play_control` | Playback control | enum | rw | `play`, `pause`, `stop`, `next`, `prev` |
 | 202 | `play` | Play specific track | string | rw | track identifier |
 | 203 | `play_mode` | Loop mode | enum | rw | `loop`, `loop1`, `shuffle` |
-| 209 | `play_volume` | Volume | value | rw | 1–100 (step 1) |
+| 209 | `play_volume` | Volume | value | rw | 44–100 (step 1) |
 | 243 | `lullaby_timer_switch` | Timer enabled | bool | rw | true/false |
 | 244 | `lullaby_timer` | Auto-stop timer (seconds) | value | rw | 0–5400 |
 | 245 | `lullaby_display` | Timer remaining (seconds) | value | ro | -1–86400 |
@@ -81,6 +116,7 @@ client.set_dps("YOUR_DEVICE_ID", {"201": "play"})   # play lullaby
 | 139 | `decibel_switch` | Sound detection on/off | bool | rw | true/false |
 | 140 | `decibel_sensitivity` | Sound sensitivity | enum | rw | `0` (off), `1` (low), `2` (high) |
 | 141 | `decibel_upload` | Sound event (read-only) | string | ro | `decibel_upload` when triggered |
+| 212 | `initiative_message` | Alarm record with snapshot pointer | raw | rw | base64 JSON: `{"cmd":"ipc_motion","alarm":true,"time":...,"files":[...]}`; one slot holding the newest alarm |
 | 239 | `monitor_sensitivity` | Background monitoring | enum | rw | `0`, `1`, `2`, `3` |
 
 ### Two-Way Audio
@@ -109,7 +145,7 @@ response includes `vedioClaritys: [2, 4, 8]`:
 | Value | Quality |
 |-------|---------|
 | 2 | HD (1920×1080) — main stream |
-| 4 | SD (640×360) — sub stream |
+| 4 | SD (1280×720) — sub stream |
 | 8 | Audio only |
 
 Set the desired quality when initiating the WebRTC connection by selecting the
@@ -127,11 +163,11 @@ or via `tuya.m.device.upgrade.rssi.info.query`.
 client.set_dps(cam_id, {"138": True, "158": 30})
 ```
 
-### Play lullaby, volume 40%, auto-stop after 30 minutes
+### Play lullaby, volume 50%, auto-stop after 30 minutes
 ```python
 client.set_dps(cam_id, {
     "201": "play",
-    "209": 40,
+    "209": 50,
     "243": True,
     "244": 1800,
 })

@@ -8,7 +8,7 @@
 [![CI](https://github.com/thekoma/aventproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/thekoma/aventproxy/actions/workflows/ci.yml)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, providing local streaming, temperature monitoring, night light control, lullaby playback, and motion/sound alerts.
+Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, providing local streaming, temperature monitoring, night light control, lullaby playback, motion/sound alerts, and SenseIQ sleep tracking.
 
 ## Features
 
@@ -23,6 +23,10 @@ Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, provid
 | 🏃 Motion Detected | Binary Sensor | Fires when motion is detected (auto-clears after 30s) |
 | 🔊 Sound Detected | Binary Sensor | Fires when sound is detected (auto-clears after 30s) |
 | 🔒 Privacy Mode | Switch | Camera on/off |
+| 😴 SenseIQ | Switch | Sleep tracking on/off |
+| 😴 SenseIQ Status | Sensor | The monitor's live sleep-tracking reading, relayed as its raw state code |
+| 🛏️ Sleep Session | Sensors | Start time and running duration of the current sleep session |
+| 📶 SenseIQ Signal Lost | Binary Sensor | Diagnostic; on while the monitor reports no SenseIQ signal |
 
 Multiple monitors on one Tuya account are supported: the bridge serves each camera from the same port on a distinct RTSP path derived from the camera's display name.
 
@@ -217,10 +221,14 @@ The integration uses the same Tuya Mobile SDK API as the official Philips Avent 
 | 158 | `floodlight_lightness` | Brightness | 1–100 |
 | 201 | `play_control` | Lullaby | play/pause/stop/next/prev |
 | 207 | `sensor_temperature` | Temperature | °C × 100 |
-| 209 | `play_volume` | Volume | 1–100 |
+| 209 | `play_volume` | Volume | 44–100 |
 | 134 | `motion_switch` | Motion alert | on/off |
 | 139 | `decibel_switch` | Sound alert | on/off |
 | 237 | `privacy_switch` | Privacy mode | 0/1 |
+| 1 | `sleepiq_switch` | SenseIQ sleep tracking | on/off |
+| 3 | `sleepiq_status` | Live SenseIQ status | JSON, raw state code |
+| 4 | `sleep_session_data` | Current sleep session | start + duration + state timeline |
+| 15 | `no_senseiq_signal` | No SenseIQ signal | true/false |
 
 Full reference: [examples/DPS_REFERENCE.md](examples/DPS_REFERENCE.md)
 

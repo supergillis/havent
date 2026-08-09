@@ -9,6 +9,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
@@ -21,6 +22,7 @@ from .const import (
     DPS_DECIBEL_EVENT,
     DPS_LULLABY_STATE,
     DPS_MOTION_SWITCH,
+    DPS_NO_SENSEIQ_SIGNAL,
 )
 from .coordinator import PhilipsAventCoordinator
 from .entity import build_device_info
@@ -41,8 +43,38 @@ async def async_setup_entry(
             AventLullabyPlaying(coordinator, cam_id),
             AventMotionDetected(coordinator, cam_id),
             AventSoundDetected(coordinator, cam_id),
+            AventSenseIQSignalLost(coordinator, cam_id),
         ])
     async_add_entities(entities)
+
+
+class AventSenseIQSignalLost(CoordinatorEntity, BinarySensorEntity):
+    """Whether the monitor currently reports no SenseIQ signal (DPS 15).
+
+    A plain read-only bool named `no_senseiq_signal` in the device schema, so
+    True is reported directly as "signal lost" with no inversion. What losing
+    the signal implies about the room (baby out of the crib, view blocked) is
+    left to the user; the entity only relays the device's own flag.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "SenseIQ Signal Lost"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:sleep-off"
+
+    def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
+        super().__init__(coordinator)
+        self._cam_id = cam_id
+        self._attr_unique_id = f"{cam_id}_senseiq_signal_lost"
+        self._attr_device_info = build_device_info(coordinator, cam_id)
+
+    @property
+    def is_on(self) -> bool | None:
+        dps = self.coordinator.data
+        if dps and DPS_NO_SENSEIQ_SIGNAL in dps:
+            return bool(dps[DPS_NO_SENSEIQ_SIGNAL])
+        return None
 
 
 class AventLullabyPlaying(CoordinatorEntity, BinarySensorEntity):
