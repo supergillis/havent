@@ -25,6 +25,7 @@ from .const import (
 from .coordinator import PhilipsAventCoordinator
 from .entity import build_device_info
 from .frame_cache import FrameCache
+from .restream import Restreamer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ async def async_setup_entry(
             if builtin
             else build_rtsp_url(bridge_host, bridge_port, coordinator.camera_name, cam_id),
             builtin=builtin,
+            restreamer=data.get("restreamer"),
         )
         for cam_id, coordinator in data["coordinators"].items()
     )
@@ -75,11 +77,13 @@ class AventCamera(Camera):
         stream_url: str,
         *,
         builtin: bool = False,
+        restreamer: Restreamer | None = None,
     ):
         super().__init__()
         self.coordinator = coordinator
         self._cam_id = cam_id
         self._stream_url = stream_url
+        self._restreamer = restreamer
         self._frame_cache = FrameCache(self._fetch_still, ttl=SNAPSHOT_TTL) if builtin else None
         self._attr_unique_id = f"{cam_id}_camera"
         self._attr_device_info = build_device_info(coordinator, cam_id)
@@ -100,6 +104,8 @@ class AventCamera(Camera):
         return False
 
     async def stream_source(self) -> str:
+        if self._restreamer is not None:
+            return await self._restreamer.stream_url(self._cam_id)
         return self._stream_url
 
     async def _fetch_still(self) -> bytes | None:

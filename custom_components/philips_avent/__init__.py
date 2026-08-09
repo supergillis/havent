@@ -34,12 +34,14 @@ from .const import (
     TUYA_DEFAULT_COUNTRY_CODE,
     TUYA_PACKAGE_NAME,
     TUYA_SIGNING_KEY,
+    builtin_stream_url,
     uses_builtin_backend,
 )
 from .coordinator import PhilipsAventCoordinator
 from .payload import BRIDGE_CONFIG_PREFIX, bridge_config_filename, build_bridge_config, orphan_bridge_configs
 from .preload import StreamPreloader
 from .region import DEFAULT_DATA_CENTER, api_host, api_url_for_host
+from .restream import Restreamer
 from .signaling import Credentials, SignalingHub
 from .stream_server import CameraSource, StreamServer
 
@@ -163,7 +165,7 @@ async def _async_start_streaming(
     api: PhilipsAventAPI,
     cameras: list,
     preloader: StreamPreloader | None,
-) -> SignalingHub:
+) -> tuple[SignalingHub, Restreamer]:
     """Serve this entry's cameras from the built-in signaling server."""
     domain_data = hass.data.setdefault(DOMAIN, {})
 
@@ -208,7 +210,12 @@ async def _async_start_streaming(
             # stays free of Home Assistant imports.
             on_answered=partial(preloader.camera_answered, cam_id) if preloader else None,
         ))
-    return hub
+    # The ws URL the restreamer registers is built from server.port, not this
+    # entry's port option: with two entries the server keeps the first one's
+    # port (see the warning above), and an option-built URL on the second
+    # entry would register a producer pointing where nothing listens.
+    restreamer = Restreamer(hass, partial(builtin_stream_url, server.port, token))
+    return hub, restreamer
 
 
 async def _async_stop_streaming(hass: HomeAssistant, data: dict) -> None:
@@ -329,11 +336,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hub = None
     preloader = None
+    restreamer = None
     builtin = uses_builtin_backend(entry.options)
     if builtin and entry.options.get(CONF_KEEP_STREAM_RUNNING, DEFAULT_KEEP_STREAM_RUNNING):
         preloader = StreamPreloader(hass)
     if builtin:
-        hub = await _async_start_streaming(hass, entry, api, cameras, preloader)
+        hub, restreamer = await _async_start_streaming(hass, entry, api, cameras, preloader)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "api": api,
@@ -341,6 +349,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinators": coordinators,
         "config": entry.data,
         "hub": hub,
+        "restreamer": restreamer,
     }
 
     if builtin:
@@ -356,22 +365,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # keep_stream_running bookkeeping. Deliberately after the platform
-    # forward: the camera entity's registration with HA's go2rtc provider
-    # happens inside it, and that registration disables any preload the
-    # provider did not ask for — resuming before it would lose the race.
+    # go2rtc bookkeeping. Deliberately after the platform forward: the camera
+    # entity's registration with HA's go2rtc provider happens inside it, and
+    # that registration disables any preload the provider did not ask for —
+    # resuming before it would lose the race. One task, serialized: the
+    # producer registration pass must precede the preload resume, whose
+    # streams.list() would otherwise race it and miss the stream it should
+    # arm.
     camera_ids = list(coordinators)
-    if preloader is not None:
-        entry.async_create_background_task(
-            hass, preloader.async_resume(camera_ids), "philips_avent go2rtc preload resume"
-        )
-    else:
-        # Option off (or the add-on backend): stop any preload a previous
-        # configuration armed, or go2rtc keeps the camera streaming for
-        # nobody. Best effort, silent when go2rtc is absent.
-        entry.async_create_background_task(
-            hass, StreamPreloader(hass).async_disable(camera_ids), "philips_avent go2rtc preload disable"
-        )
+
+    async def _go2rtc_bookkeeping() -> None:
+        if restreamer is not None:
+            # Cold-start registration: go2rtc knows the producer before the
+            # first view or thumbnail. Best effort — failures degrade inside.
+            for cam_id in camera_ids:
+                await restreamer.stream_url(cam_id)
+        if preloader is not None:
+            await preloader.async_resume(camera_ids)
+        else:
+            # Option off (or the add-on backend): stop any preload a previous
+            # configuration armed, or go2rtc keeps the camera streaming for
+            # nobody. Best effort, silent when go2rtc is absent.
+            await StreamPreloader(hass).async_disable(camera_ids)
+
+    entry.async_create_background_task(
+        hass, _go2rtc_bookkeeping(), "philips_avent go2rtc bookkeeping"
+    )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
@@ -397,5 +416,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     Without this the file survived the removal, and the add-on could pick it
     over the file of whatever entry the user created next (issue #52).
+
+    Also stop any go2rtc preload the entry armed, or an external go2rtc
+    keeps dialling the dead signaling port for nobody, indefinitely.
+    Removal only, not unload: unload runs on every options reload, and a
+    disable-then-re-arm there would churn the producer's Tuya session per
+    config change. The stream definition itself stays behind — go2rtc_client
+    has no delete, and nothing dials an unpreloaded, unconsumed stream.
     """
     await _remove_bridge_config(hass, entry)
+    if camera_ids := [cam["id"] for cam in entry.data.get("cameras", [])]:
+        await StreamPreloader(hass).async_disable(camera_ids)
