@@ -7,7 +7,10 @@ producer as go2rtc stream `philips_avent_<id>_src` — sources: the ws URL
 plus an `ffmpeg:#audio=aac` transcode, because HA's stream component drops
 any audio that is not AAC/MP3 and the camera sends PCMU — and hand out
 go2rtc's RTSP URL for it. Everything fans out from that one stream, so one
-Tuya session serves live view, HLS and frame grabs together.
+Tuya session serves live view, HLS and frame grabs together. Live view and
+stills go through here too: the builtin camera is a native-WebRTC entity
+(overriding the offer handler means HA never attaches its go2rtc provider),
+so WHEP negotiation and frame grabs are ours to make, against the producer.
 
 Where go2rtc's RTSP listens must be probed, not assumed: HA's managed
 instance pins it to 127.0.0.1:18554 in its config template, user-run ones
@@ -22,8 +25,8 @@ entity lifetime and freezes the result into its cached Stream. So only a
 permanent, config-shaped verdict (no go2rtc, RTSP disabled, remote
 go2rtc with loopback RTSP) may return the ws fallback; transient trouble
 returns the stable RTSP URL anyway — the stream worker retries its
-source, and registration catches up via the provider's frame grabs, the
-WHEP override and the setup pass. `PUT /api/streams` silently replaces a
+source, and registration catches up via WHEP live-view opens, frame
+grabs and the setup pass. `PUT /api/streams` silently replaces a
 live stream without stopping its producers, so registration is
 check-then-PUT under a lock, exactly like preload.py's arming.
 """
@@ -103,8 +106,8 @@ class Restreamer:
         stream_source() at most once per entity lifetime and freezes the
         result, so a transient failure must still return the stable RTSP
         URL: the stream worker retries its source, and re-registration
-        arrives via the provider's frame grabs, the WHEP override and the
-        setup pass."""
+        arrives via WHEP live-view opens, frame grabs and the setup
+        pass."""
         endpoint = await self._rtsp_endpoint()  # None only for permanent verdicts
         if endpoint is None:
             return self._ws_url(cam_id)
@@ -179,13 +182,14 @@ class Restreamer:
     async def whep_answer(self, cam_id: str, offer_sdp: str) -> str | None:
         """Single-hop live view: negotiate the producer stream over WHEP.
 
-        The provider path would consume the AAC-filtered RTSP and transcode
-        PCMU→AAC→opus for every viewer; WHEP against `_src` keeps the native
-        audio and one hop, as frigate-hass-integration does. Registration is
-        ensured first so a freshly restarted go2rtc can answer. Returns None
-        — never raises — when go2rtc or the client model is missing or the
-        call fails: the caller falls back to HA's provider, which is worse
-        (double hop), never broken.
+        A provider-style path would consume the AAC-filtered RTSP and
+        transcode PCMU→AAC→opus for every viewer; WHEP against `_src` keeps
+        the native audio and one hop, as frigate-hass-integration does.
+        Registration is ensured first so a freshly restarted go2rtc can
+        answer. Returns None — never raises — when go2rtc or the client
+        model is missing or the call fails; the camera reports that to the
+        frontend, because a native-WebRTC entity has no provider to fall
+        back on.
         """
         if (client := go2rtc_rest_client(self._hass)) is None or WebRTCSdpOffer is None:
             return None
@@ -193,13 +197,31 @@ class Restreamer:
         name = go2rtc_producer_name(cam_id)
         try:
             answer = await client.webrtc.forward_whep_sdp_offer(name, WebRTCSdpOffer(offer_sdp))
-        except Exception as err:  # noqa: BLE001 - fall back to the provider path
+        except Exception as err:  # noqa: BLE001 - the camera turns None into a frontend error
             self._complain_once(
                 f"WHEP against {name} failed ({describe_error(err)}); live view "
-                "runs through HA's provider stream instead"
+                "is down until go2rtc recovers"
             )
             return None
         return answer.sdp
+
+    async def snapshot(self, cam_id: str) -> bytes | None:
+        """One JPEG via go2rtc's frame handler, on the producer stream.
+
+        Shares a hot `_src` (someone watching, or keep_stream_running) for
+        free; a cold grab dials the producer and stops it again — one Tuya
+        session per cache miss, the same cost the old provider frame path
+        had. Never raises: a still is decoration, not worth breaking.
+        """
+        if (client := go2rtc_rest_client(self._hass)) is None:
+            return None
+        await self._ensure_registered(cam_id)
+        name = go2rtc_producer_name(cam_id)
+        try:
+            return await client.get_jpeg_snapshot(name)
+        except Exception as err:  # noqa: BLE001 - a failed still must never raise into the cache
+            self._complain_once(f"go2rtc frame grab for {name} failed ({describe_error(err)})")
+            return None
 
     async def _ensure_registered(self, cam_id: str) -> None:
         """Check-then-PUT under the lock. PUT /api/streams silently replaces

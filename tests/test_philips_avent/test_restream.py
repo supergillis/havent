@@ -45,6 +45,7 @@ class FakeState:
         self.fail_probe_with: BaseException | None = None
         self.fail_add_with: BaseException | None = None
         self.fail_whep_with: BaseException | None = None
+        self.fail_snapshot_with: BaseException | None = None
 
 
 class FakeProducer:
@@ -133,6 +134,13 @@ def install_go2rtc(monkeypatch, hass, state, url="http://localhost:11984/"):
             assert session is not None and url
             self.streams = FakeStreamsAPI(state)
             self.webrtc = FakeWebRTCAPI(state)
+
+        async def get_jpeg_snapshot(self, name, width=None, height=None):
+            # Mirrors the real top-level method (GET /api/frame.jpeg).
+            state.calls.append(("frame.jpeg", name))
+            if state.fail_snapshot_with is not None:
+                raise state.fail_snapshot_with
+            return b"\xff\xd8fake-jpeg"
 
     monkeypatch.setattr(preload_mod, "Go2RtcRestClient", FakeClient)
     monkeypatch.setattr(restream_mod, "WebRTCSdpOffer", FakeSdpModel)
@@ -249,11 +257,10 @@ def test_reput_when_sources_differ(monkeypatch):
 
 
 def test_reregisters_after_go2rtc_restart(monkeypatch):
-    """The callers that make this self-healing are the provider's
-    _update_stream_source (per frame grab), the WHEP override (per
-    live-view open) and the setup pass — NOT the stream component, which
-    never re-calls stream_source(); and on_answered can never fire while
-    _src is unregistered."""
+    """The callers that make this self-healing are the WHEP override (per
+    live-view open), snapshot (per frame-cache miss) and the setup pass —
+    NOT the stream component, which never re-calls stream_source(); and
+    on_answered can never fire while _src is unregistered."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     restreamer = make_restreamer(hass)
@@ -309,14 +316,38 @@ def test_whep_answer_none_when_no_go2rtc(monkeypatch):
 
 
 def test_whep_answer_never_raises(monkeypatch, caplog):
-    """None means the caller falls back to HA's provider path — a double
-    hop is worse, a broken live view is unacceptable."""
+    """None means the camera sends the frontend a WebRTCError — a native
+    entity has no provider to fall back on, so the failure must arrive as
+    a message, never as an exception out of the offer handler."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     state.fail_whep_with = TimeoutError()
     with caplog.at_level(logging.WARNING, logger="restream"):
         assert run(make_restreamer(hass).whep_answer("cam1", "v=0 offer")) is None
     assert "TimeoutError" in caplog.text
+
+
+def test_snapshot_grabs_a_frame_from_the_producer(monkeypatch):
+    """Stills come from go2rtc's frame handler on _src — registered first,
+    so a freshly restarted go2rtc can serve the very first thumbnail."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    frame = run(make_restreamer(hass).snapshot("cam1"))
+    assert frame == b"\xff\xd8fake-jpeg"
+    assert ("frame.jpeg", SRC) in state.calls
+    assert adds(state) == [("streams.add", SRC, WANT)]  # registered before the grab
+
+
+def test_snapshot_failure_returns_none(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_snapshot_with = TimeoutError()
+    assert run(make_restreamer(hass).snapshot("cam1")) is None
+
+
+def test_snapshot_none_when_no_go2rtc(monkeypatch):
+    hass = FakeHass()  # hass.data empty
+    assert run(make_restreamer(hass).snapshot("cam1")) is None
 
 
 def test_probe_success_is_cached_transient_failure_is_not(monkeypatch):

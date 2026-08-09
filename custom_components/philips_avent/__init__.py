@@ -365,13 +365,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # go2rtc bookkeeping. Deliberately after the platform forward: the camera
-    # entity's registration with HA's go2rtc provider happens inside it, and
-    # that registration disables any preload the provider did not ask for —
-    # resuming before it would lose the race. One task, serialized: the
-    # producer registration pass must precede the preload resume, whose
-    # streams.list() would otherwise race it and miss the stream it should
-    # arm.
+    # go2rtc bookkeeping. One task, serialized: the producer registration
+    # pass must precede the preload resume, whose streams.list() would
+    # otherwise race it and miss the stream it should arm. (The builtin
+    # camera is a native-WebRTC entity now — no HA provider is attached
+    # that could disarm preloads behind our back, so the old
+    # resume-after-platform-forward race is history.)
     camera_ids = list(coordinators)
 
     async def _go2rtc_bookkeeping() -> None:
