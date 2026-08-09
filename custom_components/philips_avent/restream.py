@@ -29,9 +29,27 @@ check-then-PUT under a lock, exactly like preload.py's arming.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
+
+try:
+    from .const import go2rtc_producer_name
+    from .preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
+except ImportError:  # imported outside the package, e.g. by the tests
+    from const import go2rtc_producer_name
+    from preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+#: The probe must not hang stream_source(): HA's default session has no
+#: total timeout, and a stuck GET here would stall every stream open.
+_PROBE_TIMEOUT = 5.0
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
 _ALL_INTERFACES = ("", "0.0.0.0", "::", "[::]")
@@ -60,3 +78,117 @@ def parse_rtsp_endpoint(listen: str | None, api_host: str) -> tuple[str, int] | 
     if host in _LOOPBACK_HOSTS:
         return ("127.0.0.1", port) if api_local else None
     return (host, port)
+
+
+class Restreamer:
+    """Registers each camera's producer in go2rtc and hands out its RTSP URL."""
+
+    def __init__(self, hass: HomeAssistant, ws_url: Callable[[str], str]) -> None:
+        self._hass = hass
+        self._ws_url = ws_url
+        self._endpoint: tuple[str, int] | None = None  # cached on success only
+        self._no_rtsp = False  # the permanent this-config-has-no-RTSP verdict
+        self._lock = asyncio.Lock()  # serializes the check-then-PUT
+        self._warned = False
+
+    async def stream_url(self, cam_id: str) -> str:
+        """The producer's RTSP URL, or the webrtc: fallback — but the
+        fallback ONLY for permanent, config-shaped verdicts (no go2rtc,
+        RTSP disabled, remote-loopback). HA's stream component calls
+        stream_source() at most once per entity lifetime and freezes the
+        result, so a transient failure must still return the stable RTSP
+        URL: the stream worker retries its source, and re-registration
+        arrives via the provider's frame grabs, the WHEP override and the
+        setup pass."""
+        endpoint = await self._rtsp_endpoint()  # None only for permanent verdicts
+        if endpoint is None:
+            return self._ws_url(cam_id)
+        await self._ensure_registered(cam_id)  # best effort; the URL is stable either way
+        host, port = endpoint
+        return f"rtsp://{host}:{port}/{go2rtc_producer_name(cam_id)}?video&audio=aac"
+
+    def sources(self, cam_id: str) -> list[str]:
+        """The producer's go2rtc sources: the real session, plus an AAC
+        transcode — HA's stream component drops any audio that is not
+        AAC/MP3, and silent recordings on a baby monitor are worse than
+        none. go2rtc starts the ffmpeg source only when a consumer asks
+        for AAC, so live view never pays for it."""
+        name = go2rtc_producer_name(cam_id)
+        return [self._ws_url(cam_id), f"ffmpeg:{name}#audio=aac"]
+
+    def _complain_once(self, message: str) -> None:
+        """One warning per entry; repeats drop to debug so the log stays calm."""
+        if self._warned:
+            _LOGGER.debug("%s", message)
+            return
+        self._warned = True
+        _LOGGER.warning("%s", message)
+
+    async def _rtsp_endpoint(self) -> tuple[str, int] | None:
+        """Where go2rtc's RTSP listens, or None to fall back to the ws URL.
+
+        Success and the no-RTSP verdict are config-shaped and cached for
+        the entry's lifetime; a failed request is transient — assume the
+        managed instance's pinned endpoint when the API host is loopback,
+        cache nothing, and re-probe on the next call.
+        """
+        if self._no_rtsp:
+            return None
+        if self._endpoint is not None:
+            return self._endpoint
+        config = self._hass.data.get(_GO2RTC_DATA)
+        url = getattr(config, "url", None)
+        session = getattr(config, "session", None)
+        if not url or session is None:
+            self._complain_once(
+                "Home Assistant's go2rtc is not available; HLS, recording and "
+                "casting are off until it is (live view may still work)"
+            )
+            return None  # rechecked next call: go2rtc may just not be up yet
+        api_host = urlsplit(url).hostname or ""
+        try:
+            async with asyncio.timeout(_PROBE_TIMEOUT):
+                async with session.get(url.rstrip("/") + "/api") as resp:
+                    info = await resp.json()
+        except Exception as err:  # noqa: BLE001 - a failed probe must never break stream_source
+            if api_host in _LOOPBACK_HOSTS:
+                _LOGGER.debug(
+                    "go2rtc /api probe failed (%s); assuming the managed "
+                    "instance's RTSP at %s:%d until a probe succeeds",
+                    describe_error(err), *MANAGED_RTSP,
+                )
+                return MANAGED_RTSP
+            self._complain_once(f"go2rtc /api probe failed ({describe_error(err)})")
+            return None
+        endpoint = parse_rtsp_endpoint((info.get("rtsp") or {}).get("listen"), api_host)
+        if endpoint is None:
+            self._no_rtsp = True
+            self._complain_once(
+                "go2rtc has no RTSP endpoint Home Assistant could reach; HLS, "
+                "recording and casting are unavailable (live view is unaffected)"
+            )
+            return None
+        self._endpoint = endpoint
+        return endpoint
+
+    async def _ensure_registered(self, cam_id: str) -> None:
+        """Check-then-PUT under the lock. PUT /api/streams silently replaces
+        a live stream without stopping its producers, so a blind PUT here is
+        the same Tuya-session feedback loop preload.py refuses."""
+        if (client := go2rtc_rest_client(self._hass)) is None:
+            return
+        name = go2rtc_producer_name(cam_id)
+        want = self.sources(cam_id)
+        try:
+            async with self._lock:
+                stream = (await client.streams.list()).get(name)
+                have = [p.url for p in stream.producers] if stream else None
+                if have != want:
+                    await client.streams.add(name, want)
+                    # The name, never the sources: the ws URL embeds the token.
+                    _LOGGER.info("Registered go2rtc producer stream %s", name)
+        except Exception as err:  # noqa: BLE001 - registration is best effort; the URL is stable
+            self._complain_once(
+                f"Could not register go2rtc stream {name} ({describe_error(err)}); "
+                "will retry on the next frame grab or live view"
+            )
