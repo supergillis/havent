@@ -8,7 +8,11 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 
-REDACT_KEYS = {"sid", "ecode", "uid", "partner_identity", "localKey", "local_key", "password", "email"}
+REDACT_KEYS = {
+    "sid", "ecode", "uid", "partner_identity", "localKey", "local_key", "password", "email",
+    # Anyone holding this can open a camera session against the signaling endpoint.
+    "stream_token",
+}
 
 
 def _redact(data: dict, keys: set) -> dict:
@@ -26,8 +30,17 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
 
     diag: dict[str, Any] = {
         "config_entry": _redact(dict(entry.data), REDACT_KEYS),
+        "options": dict(entry.options),
         "devices": {},
     }
+
+    # Why the last stream attempt failed, which is otherwise only in the log.
+    if (server := hass.data[DOMAIN].get("server")) is not None:
+        diag["stream_errors"] = {
+            cam_id: source.last_error
+            for cam_id, source in server.cameras.items()
+            if source.last_error
+        }
 
     for cam_id, coordinator in coordinators.items():
         diag["devices"][cam_id] = {

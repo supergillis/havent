@@ -1,4 +1,4 @@
-from const import DEFAULT_BRIDGE_HOST, build_rtsp_url, sanitize_rtsp_path
+from const import DEFAULT_BRIDGE_HOST, build_rtsp_url, go2rtc_stream_name, sanitize_rtsp_path
 
 
 def test_simple_name():
@@ -59,3 +59,16 @@ class TestBuildRtspUrl:
 
     def test_unnamed_camera_falls_back_to_the_id(self):
         assert build_rtsp_url("host", 38554, "", "dev1") == "rtsp://host:38554/dev1"
+
+
+class TestGo2rtcStreamName:
+    """The name the keep_stream_running option arms go2rtc's preload with.
+
+    It must equal what Home Assistant's go2rtc provider registers the
+    camera's stream under: get_camera_identifier (go2rtc/util.py) =
+    quote(f"{platform_name}_{unique_id}") with letters, digits and "._-"
+    kept, and our camera unique_id is f"{cam_id}_camera" (camera.py).
+    """
+
+    def test_matches_the_ha_identifier_shape(self):
+        assert go2rtc_stream_name("bfa1b2c3d4e5f6") == "philips_avent_bfa1b2c3d4e5f6_camera"

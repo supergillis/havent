@@ -20,7 +20,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install pytest pycryptodome aiohttp voluptuous
+        run: pip install pytest pycryptodome aiohttp voluptuous paho-mqtt
 
       - name: Lint
         run: |

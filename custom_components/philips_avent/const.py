@@ -1,6 +1,9 @@
 """Constants for the Philips Avent Baby Monitor integration."""
 from __future__ import annotations
 
+import string
+from urllib.parse import quote
+
 DOMAIN = "philips_avent"
 
 # Tuya Mobile SDK credentials (static per APK version)
@@ -126,6 +129,59 @@ DEFAULT_BRIDGE_HOST = "localhost"
 # (issue #72), so listening must not imply talking.
 CONF_TALKBACK = "talkback"
 DEFAULT_TALKBACK = False
+
+# Where the video comes from. "addon" is the Docker bridge that has always
+# served RTSP on CONF_BRIDGE_PORT; "builtin" does the Tuya signaling inside
+# Home Assistant and lets its bundled go2rtc carry the media, which needs no
+# container at all. Run one or the other, never both: they would derive the
+# same Tuya MQTT client id and knock each other off the broker.
+CONF_STREAM_BACKEND = "stream_backend"
+BACKEND_ADDON = "addon"
+BACKEND_BUILTIN = "builtin"
+DEFAULT_STREAM_BACKEND = BACKEND_ADDON
+STREAM_BACKENDS = [BACKEND_ADDON, BACKEND_BUILTIN]
+
+# The built-in backend's own HTTP port. It listens on loopback only: the one
+# thing that dials it is the go2rtc that Home Assistant runs beside us.
+CONF_SIGNALING_PORT = "signaling_port"
+DEFAULT_SIGNALING_PORT = 38555
+# Carried in the signaling URL. The socket is already loopback-only, so this is
+# just the second lock: nothing else on the host can open a camera session.
+CONF_STREAM_TOKEN = "stream_token"
+
+# Keep the built-in backend's stream permanently connected. Off by default:
+# it trades continuous LAN streaming from the camera — whether or not anyone
+# is watching — for instant stream opens and zero Tuya session churn, the
+# same one-long-lived-session behaviour the Go bridge has always had. Only
+# meaningful on the builtin backend. Driven through go2rtc's own preload
+# API, NOT Home Assistant's `preload_stream` camera preference, which would
+# feed our webrtc: URL to ffmpeg/HLS (see preload.py for the full why).
+CONF_KEEP_STREAM_RUNNING = "keep_stream_running"
+DEFAULT_KEEP_STREAM_RUNNING = False
+
+
+def uses_builtin_backend(options) -> bool:
+    """Whether these entry options stream through Home Assistant, not the add-on."""
+    return options.get(CONF_STREAM_BACKEND, DEFAULT_STREAM_BACKEND) == BACKEND_BUILTIN
+
+
+#: Characters a go2rtc stream name keeps as-is; everything else is
+#: percent-encoded. Mirrors _SAFE_CHARS in Home Assistant's go2rtc/util.py.
+_GO2RTC_SAFE_CHARS = string.ascii_letters + string.digits + "._-"
+
+
+def go2rtc_stream_name(cam_id: str) -> str:
+    """The name go2rtc knows this camera's stream by.
+
+    Mirrors `get_camera_identifier` in Home Assistant's go2rtc integration
+    (homeassistant/components/go2rtc/util.py): the camera platform's name
+    plus the entity's unique_id, percent-encoded. Our camera unique_id is
+    f"{cam_id}_camera" (camera.py), so the stream name is
+    "philips_avent_<cam_id>_camera". The two MUST stay in sync — this name
+    is what the keep_stream_running option arms go2rtc's preload with, and
+    a mismatch would arm a stream that does not exist.
+    """
+    return quote(f"{DOMAIN}_{cam_id}_camera", safe=_GO2RTC_SAFE_CHARS)
 
 
 def sanitize_rtsp_path(name: str, cam_id: str) -> str:
