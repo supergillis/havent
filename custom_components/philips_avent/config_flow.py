@@ -20,14 +20,21 @@ from .const import (
     CONF_COUNTRY_CODE,
     CONF_DEVICE_ID,
     CONF_ECODE,
+    CONF_KEEP_STREAM_RUNNING,
     CONF_PARTNER,
     CONF_SID,
+    CONF_SIGNALING_PORT,
+    CONF_STREAM_BACKEND,
     CONF_TALKBACK,
     CONF_UID,
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
+    DEFAULT_KEEP_STREAM_RUNNING,
+    DEFAULT_SIGNALING_PORT,
+    DEFAULT_STREAM_BACKEND,
     DEFAULT_TALKBACK,
     DOMAIN,
+    STREAM_BACKENDS,
 )
 from .region import (
     COUNTRY_ROUTING,
@@ -410,6 +417,14 @@ class PhilipsAventOptionsFlowHandler(config_entries.OptionsFlow):
         current_talkback = self.config_entry.options.get(
             CONF_TALKBACK, DEFAULT_TALKBACK
         )
+        options = self.config_entry.options
+        current_backend = options.get(CONF_STREAM_BACKEND, DEFAULT_STREAM_BACKEND)
+        current_signaling_port = options.get(
+            CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT
+        )
+        current_keep_running = options.get(
+            CONF_KEEP_STREAM_RUNNING, DEFAULT_KEEP_STREAM_RUNNING
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -420,6 +435,15 @@ class PhilipsAventOptionsFlowHandler(config_entries.OptionsFlow):
                         int, vol.Range(min=1024, max=65535)
                     ),
                     vol.Optional(CONF_TALKBACK, default=current_talkback): bool,
+                    vol.Optional(
+                        CONF_STREAM_BACKEND, default=current_backend
+                    ): vol.In(STREAM_BACKENDS),
+                    vol.Optional(
+                        CONF_SIGNALING_PORT, default=current_signaling_port
+                    ): vol.All(int, vol.Range(min=1024, max=65535)),
+                    vol.Optional(
+                        CONF_KEEP_STREAM_RUNNING, default=current_keep_running
+                    ): bool,
                 }
             ),
         )

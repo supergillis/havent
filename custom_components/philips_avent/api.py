@@ -252,6 +252,22 @@ class PhilipsAventAPI:
             "smartlife.m.rtc.config.get", post_data={"devId": dev_id}
         )
 
+    async def p2p_prelink(self, dev_id: str) -> None:
+        """Warm up the camera's P2P path before asking for a WebRTC config.
+
+        The app calls this first and so does the Go bridge. A failure here is
+        not fatal: the WebRTC config request may still succeed.
+        """
+        await self._call(
+            "smartlife.m.p2p.main.pre.link.get", post_data={"devId": dev_id}
+        )
+
+    async def rtc_session_init(self, dev_id: str) -> None:
+        """Announce a new RTC session. Also non-fatal (see p2p_prelink)."""
+        await self._call(
+            "smartlife.m.rtc.session.init", post_data={"devId": dev_id}
+        )
+
     async def discover_cameras(self) -> list[dict]:
         """Find all IPC cameras in the account."""
         cameras = []

@@ -72,3 +72,4 @@ class AventWifiSignalSensor(CoordinatorEntity, SensorEntity):
         if hasattr(self.coordinator, "rssi"):
             return self.coordinator.rssi
         return None
+
