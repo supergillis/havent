@@ -183,6 +183,14 @@ def test_enable_failure_never_raises(monkeypatch, caplog):
     assert "TimeoutError" in caplog.text
 
 
+def test_module_level_client_reads_the_same_slot(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    assert preload_mod.go2rtc_rest_client(hass) is not None
+    hass.data.clear()
+    assert preload_mod.go2rtc_rest_client(hass) is None
+
+
 def test_describe_error_survives_cause_cycles():
     # A __cause__ cycle must not hang the warning path.
     a, b = ValueError("a"), ValueError("b")

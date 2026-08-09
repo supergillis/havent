@@ -70,6 +70,20 @@ _NO_GO2RTC = (
 )
 
 
+def go2rtc_rest_client(hass: HomeAssistant) -> Go2RtcRestClient | None:
+    """The rest client for HA's go2rtc, or None when there is none.
+
+    Module-level so restream.py can share it; the name deliberately does
+    not shadow this module's `go2rtc_client` package import.
+    """
+    config = hass.data.get(_GO2RTC_DATA)
+    url = getattr(config, "url", None)
+    session = getattr(config, "session", None)
+    if Go2RtcRestClient is None or not url or session is None:
+        return None
+    return Go2RtcRestClient(session, url)
+
+
 def describe_error(err: BaseException) -> str:
     """A log-worthy account of an exception whose str() may be empty.
 
@@ -99,13 +113,7 @@ class StreamPreloader:
         self._lock = asyncio.Lock()  # serializes the check-then-PUT
 
     def _client(self) -> Go2RtcRestClient | None:
-        """The rest client for HA's go2rtc, or None when there is none."""
-        config = self._hass.data.get(_GO2RTC_DATA)
-        url = getattr(config, "url", None)
-        session = getattr(config, "session", None)
-        if Go2RtcRestClient is None or not url or session is None:
-            return None
-        return Go2RtcRestClient(session, url)
+        return go2rtc_rest_client(self._hass)
 
     def _complain_once(self, message: str) -> None:
         """One warning per entry; repeats drop to debug so the log stays calm."""
