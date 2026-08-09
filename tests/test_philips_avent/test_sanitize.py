@@ -1,6 +1,7 @@
 from const import (
     DEFAULT_BRIDGE_HOST,
     build_rtsp_url,
+    builtin_stream_url,
     go2rtc_producer_name,
     go2rtc_stream_name,
     sanitize_rtsp_path,
@@ -90,3 +91,10 @@ class TestGo2rtcProducerName:
         a self-consuming loop go2rtc does not guard against."""
         for cam_id in ("abc123", "weird id/☂", "", "_camera", "x_src"):
             assert go2rtc_producer_name(cam_id) != go2rtc_stream_name(cam_id)
+
+
+def test_builtin_stream_url_is_pure():
+    assert (
+        builtin_stream_url(38555, "tok", "cam1")
+        == "webrtc:ws://127.0.0.1:38555/avent/cam1?t=tok"
+    )

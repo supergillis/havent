@@ -19,6 +19,7 @@ from .const import (
     DEFAULT_SIGNALING_PORT,
     DOMAIN,
     build_rtsp_url,
+    builtin_stream_url,
     uses_builtin_backend,
 )
 from .coordinator import PhilipsAventCoordinator
@@ -35,18 +36,6 @@ _LOGGER = logging.getLogger(__name__)
 SNAPSHOT_TTL = 60.0
 
 
-def builtin_stream_url(entry: ConfigEntry, cam_id: str) -> str:
-    """The signaling endpoint go2rtc should dial for this camera.
-
-    A `webrtc:` source, not an RTSP one: go2rtc accepts any scheme it supports
-    (`GET /api/schemes`), and Home Assistant's own go2rtc integration registers
-    whatever `stream_source()` returns without caring what the scheme is.
-    """
-    port = entry.options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT)
-    token = entry.data.get(CONF_STREAM_TOKEN, "")
-    return f"webrtc:ws://127.0.0.1:{port}/avent/{cam_id}?t={token}"
-
-
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -59,7 +48,11 @@ async def async_setup_entry(
         AventCamera(
             coordinator,
             cam_id,
-            builtin_stream_url(entry, cam_id)
+            builtin_stream_url(
+                entry.options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT),
+                entry.data.get(CONF_STREAM_TOKEN, ""),
+                cam_id,
+            )
             if builtin
             else build_rtsp_url(bridge_host, bridge_port, coordinator.camera_name, cam_id),
             builtin=builtin,

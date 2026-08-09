@@ -214,6 +214,18 @@ def go2rtc_producer_name(cam_id: str) -> str:
     return name
 
 
+def builtin_stream_url(port: int, token: str, cam_id: str) -> str:
+    """The signaling endpoint go2rtc dials to open this camera's session.
+
+    This URL is registered as the producer stream's source (restream.py);
+    what stream_source() hands out is normally the producer's RTSP URL,
+    and this ws URL is only the last-resort fallback when go2rtc has no
+    RTSP the stream component could reach. Pure on purpose: restream.py
+    must stay importable without Home Assistant.
+    """
+    return f"webrtc:ws://127.0.0.1:{port}/avent/{cam_id}?t={token}"
+
+
 def sanitize_rtsp_path(name: str, cam_id: str) -> str:
     """Convert a camera display name into an RTSP path component.
 
