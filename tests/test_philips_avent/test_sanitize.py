@@ -1,4 +1,10 @@
-from const import DEFAULT_BRIDGE_HOST, build_rtsp_url, go2rtc_stream_name, sanitize_rtsp_path
+from const import (
+    DEFAULT_BRIDGE_HOST,
+    build_rtsp_url,
+    go2rtc_producer_name,
+    go2rtc_stream_name,
+    sanitize_rtsp_path,
+)
 
 
 def test_simple_name():
@@ -72,3 +78,15 @@ class TestGo2rtcStreamName:
 
     def test_matches_the_ha_identifier_shape(self):
         assert go2rtc_stream_name("bfa1b2c3d4e5f6") == "philips_avent_bfa1b2c3d4e5f6_camera"
+
+
+class TestGo2rtcProducerName:
+    def test_producer_name_shape(self):
+        assert go2rtc_producer_name("abc123") == "philips_avent_abc123_src"
+
+    def test_producer_name_never_collides_with_camera_stream_name(self):
+        """If the two were ever equal, HA's provider would register the camera
+        stream over our producer and its source would become its own restream —
+        a self-consuming loop go2rtc does not guard against."""
+        for cam_id in ("abc123", "weird id/☂", "", "_camera", "x_src"):
+            assert go2rtc_producer_name(cam_id) != go2rtc_stream_name(cam_id)

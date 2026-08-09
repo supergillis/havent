@@ -198,6 +198,22 @@ def go2rtc_stream_name(cam_id: str) -> str:
     return quote(f"{DOMAIN}_{cam_id}_camera", safe=_GO2RTC_SAFE_CHARS)
 
 
+def go2rtc_producer_name(cam_id: str) -> str:
+    """The go2rtc stream that holds the camera's actual Tuya session.
+
+    Registered by restream.py with the signaling ws URL as its source;
+    everything else — HA's provider stream, HLS, recordings, frame grabs —
+    consumes this stream's RTSP. The name MUST differ from
+    go2rtc_stream_name() forever: HA's provider owns that name and would
+    overwrite ours, turning the camera stream's source into its own
+    restream (a loop). The suffixes `_src` vs `_camera` guarantee it; the
+    assert guards refactors that touch either.
+    """
+    name = quote(f"{DOMAIN}_{cam_id}_src", safe=_GO2RTC_SAFE_CHARS)
+    assert name != go2rtc_stream_name(cam_id)
+    return name
+
+
 def sanitize_rtsp_path(name: str, cam_id: str) -> str:
     """Convert a camera display name into an RTSP path component.
 
