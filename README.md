@@ -57,6 +57,57 @@ Or manually:
 3. Install "Philips Avent Baby Monitor"
 4. Restart Home Assistant
 
+### Video: pick a backend
+
+Two ways to get the picture out of the camera. The **built-in** backend is new; the **add-on** is
+what every release so far has used and remains the default. Switch under
+Settings → Devices & Services → Philips Avent → Configure.
+
+| | Add-on (default) | Built-in |
+|---|---|---|
+| Extra container | Yes, one per install | **None** |
+| Works on HA Container / Core | Only if you run the bridge yourself | Yes, if go2rtc is available |
+| Camera entity | Yes, over RTSP | Yes, over WebRTC |
+| Snapshots | ffmpeg on the RTSP stream | go2rtc's own frame grab |
+| HLS, `camera.record`, casting | Yes | No |
+| Two-way audio | Yes | Not yet |
+| A URL to watch outside HA | `rtsp://…:38554/<name>` in VLC | go2rtc's own page (see below) |
+
+The built-in backend does the Tuya signaling inside Home Assistant and lets the go2rtc that HA
+already ships carry the video, so the camera talks straight to go2rtc over your LAN and nothing else
+runs. Home Assistant only bundles go2rtc for container-based installs; on HA Core in a venv, install
+go2rtc yourself and point HA at it with `go2rtc: url:` in `configuration.yaml`.
+
+**Run one or the other, never both on the same account.** Both derive the same Tuya MQTT client id
+and will knock each other off the broker. Switching to the built-in backend deletes the add-on's
+config file and logs a reminder to stop the add-on.
+
+### A URL to watch outside Home Assistant
+
+On the built-in backend the video is terminated by go2rtc, so go2rtc is what serves a watchable
+URL. Home Assistant keeps its bundled instance private by default; turn on its debug UI to reach it:
+
+```yaml
+# configuration.yaml
+go2rtc:
+  debug_ui: true
+  username: someone
+  password: something
+```
+
+Then open, on the tablet:
+
+```
+http://<home-assistant>:11984/stream.html?src=philips_avent_<camera-id>_camera&mode=webrtc
+```
+
+The stream name is how Home Assistant registers the camera with go2rtc: the platform name, the
+entity's unique id, joined with underscores. Media still goes camera → viewer directly; only the
+handshake passes through. Note the managed go2rtc enables no `hls` or `mp4` module and its API
+allowlist excludes `/api/stream.mjpeg`, so **WebRTC is the mode that works** — MSE, HLS and MJPEG
+all 404. If you want those, or an RTSP URL on the LAN, run your own go2rtc (1.9.13 or newer) and
+point Home Assistant at it with `go2rtc: url:`.
+
 ### Add-on (WebRTC Bridge)
 
 [![Add add-on repository](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fthekoma%2Faventproxy)
