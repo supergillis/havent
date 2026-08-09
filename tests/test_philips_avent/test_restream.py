@@ -41,6 +41,7 @@ class FakeState:
         self.streams: dict[str, FakeStream] = {}
         self.calls: list[tuple] = []
         self.rtsp_listen: str | None = "127.0.0.1:18554"
+        self.probe_status = 200
         self.probe_calls = 0
         self.fail_probe_with: BaseException | None = None
         self.fail_add_with: BaseException | None = None
@@ -96,6 +97,7 @@ class FakeWebRTCAPI:
 class FakeResponse:
     def __init__(self, state):
         self._state = state
+        self.status = state.probe_status
 
     async def __aenter__(self):
         return self
@@ -325,6 +327,66 @@ def test_whep_answer_never_raises(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="restream"):
         assert run(make_restreamer(hass).whep_answer("cam1", "v=0 offer")) is None
     assert "TimeoutError" in caplog.text
+
+
+def test_probe_http_4xx_is_a_permanent_verdict(monkeypatch, caplog):
+    """A 4xx is config-shaped — this go2rtc will keep refusing (auth we do
+    not have, a path ACL) — so it caches the ws fallback like no-RTSP,
+    instead of pinning MANAGED_RTSP on a possibly-external instance
+    forever."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.probe_status = 404
+    restreamer = make_restreamer(hass)
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        assert run(restreamer.stream_url("cam1")) == WS
+        assert run(restreamer.stream_url("cam1")) == WS
+    assert "HTTP 404" in caplog.text
+    assert state.probe_calls == 1  # the verdict is cached
+
+
+def test_probe_http_5xx_is_transient(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.probe_status = 503
+    restreamer = make_restreamer(hass)
+    host, port = MANAGED_RTSP
+    assert run(restreamer.stream_url("cam1")) == f"rtsp://{host}:{port}/{SRC}?video&audio=aac"
+    run(restreamer.stream_url("cam1"))
+    assert state.probe_calls == 2  # nothing cached, re-probed
+
+
+def test_registration_error_never_leaks_the_token(monkeypatch, caplog):
+    """A failed PUT renders its request URL, whose query carries the ws
+    source with the stream token; describe_error redacts query strings."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_add_with = RuntimeError(
+        "400, url='http://localhost:11984/api/streams?name=x&src=webrtc%3A"
+        "ws%3A%2F%2F127.0.0.1%3A38555%2Favent%2Fcam1%3Ft%3Dtok'"
+    )
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert "Could not register" in caplog.text
+    assert "tok" not in caplog.text
+    assert "<redacted>" in caplog.text
+
+
+def test_warnings_are_per_kind(monkeypatch, caplog):
+    """A registration hiccup must not demote a later, different complaint
+    (here: a failing WHEP negotiation) to a debug line — but each kind
+    still warns only once."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_add_with = TimeoutError()
+    state.fail_whep_with = TimeoutError()
+    restreamer = make_restreamer(hass)
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        run(restreamer.stream_url("cam1"))  # warns: could not register
+        run(restreamer.whep_answer("cam1", "v=0 offer"))  # must still warn
+        run(restreamer.whep_answer("cam1", "v=0 offer"))  # repeat: debug
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
 
 
 def test_snapshot_grabs_a_frame_from_the_producer(monkeypatch):

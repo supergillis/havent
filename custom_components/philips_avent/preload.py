@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -86,6 +87,12 @@ def go2rtc_rest_client(hass: HomeAssistant) -> Go2RtcRestClient | None:
     return Go2RtcRestClient(session, url)
 
 
+#: Query strings never make it into a log line: an HTTP error from
+#: go2rtc_client renders the request URL, and a failed `streams.add` PUT
+#: carries the producer's ws source — stream token included — in its query.
+_QUERY_STRING = re.compile(r"\?[^\s'\"]+")
+
+
 def describe_error(err: BaseException) -> str:
     """A log-worthy account of an exception whose str() may be empty.
 
@@ -98,7 +105,7 @@ def describe_error(err: BaseException) -> str:
     cur: BaseException | None = err
     while cur is not None and id(cur) not in seen and len(parts) < 5:
         seen.add(id(cur))
-        text = str(cur)
+        text = _QUERY_STRING.sub("?<redacted>", str(cur))
         name = type(cur).__name__
         parts.append(f"{name}: {text}" if text else name)
         cur = cur.__cause__

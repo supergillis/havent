@@ -97,7 +97,7 @@ class Restreamer:
         self._endpoint: tuple[str, int] | None = None  # cached on success only
         self._no_rtsp = False  # the permanent this-config-has-no-RTSP verdict
         self._lock = asyncio.Lock()  # serializes the check-then-PUT
-        self._warned = False
+        self._warned: set[str] = set()  # complaint kinds already warned about
 
     async def stream_url(self, cam_id: str) -> str:
         """The producer's RTSP URL, or the webrtc: fallback — but the
@@ -124,12 +124,17 @@ class Restreamer:
         name = go2rtc_producer_name(cam_id)
         return [self._ws_url(cam_id), f"ffmpeg:{name}#audio=aac"]
 
-    def _complain_once(self, message: str) -> None:
-        """One warning per entry; repeats drop to debug so the log stays calm."""
-        if self._warned:
+    def _complain_once(self, kind: str, message: str) -> None:
+        """One warning per complaint KIND; repeats drop to debug.
+
+        Keyed, not a single flag: a transient registration hiccup at setup
+        must not demote a later, permanent "HLS unavailable" verdict to a
+        debug line nobody sees.
+        """
+        if kind in self._warned:
             _LOGGER.debug("%s", message)
             return
-        self._warned = True
+        self._warned.add(kind)
         _LOGGER.warning("%s", message)
 
     async def _rtsp_endpoint(self) -> tuple[str, int] | None:
@@ -149,35 +154,58 @@ class Restreamer:
         session = getattr(config, "session", None)
         if not url or session is None:
             self._complain_once(
+                "no-go2rtc",
                 "Home Assistant's go2rtc is not available; HLS, recording and "
-                "casting are off until it is (live view may still work)"
+                "casting are off until it is (live view may still work)",
             )
             return None  # rechecked next call: go2rtc may just not be up yet
         api_host = urlsplit(url).hostname or ""
+        status = None
+        info = None
         try:
             async with asyncio.timeout(_PROBE_TIMEOUT):
                 async with session.get(url.rstrip("/") + "/api") as resp:
-                    info = await resp.json()
+                    status = resp.status
+                    if status == 200:
+                        info = await resp.json()
         except Exception as err:  # noqa: BLE001 - a failed probe must never break stream_source
-            if api_host in _LOOPBACK_HOSTS:
-                _LOGGER.debug(
-                    "go2rtc /api probe failed (%s); assuming the managed "
-                    "instance's RTSP at %s:%d until a probe succeeds",
-                    describe_error(err), *MANAGED_RTSP,
+            return self._probe_trouble(describe_error(err), api_host)
+        if info is None:
+            if status is not None and 400 <= status < 500:
+                # Config-shaped: this go2rtc will keep refusing the probe
+                # (auth we do not have, a path ACL), so treat it like no
+                # RTSP rather than guessing endpoints forever.
+                self._no_rtsp = True
+                self._complain_once(
+                    "no-rtsp",
+                    f"go2rtc's API refused the /api probe (HTTP {status}); HLS, "
+                    "recording and casting are unavailable (live view is unaffected)",
                 )
-                return MANAGED_RTSP
-            self._complain_once(f"go2rtc /api probe failed ({describe_error(err)})")
-            return None
+                return None
+            return self._probe_trouble(f"HTTP {status}", api_host)
         endpoint = parse_rtsp_endpoint((info.get("rtsp") or {}).get("listen"), api_host)
         if endpoint is None:
             self._no_rtsp = True
             self._complain_once(
+                "no-rtsp",
                 "go2rtc has no RTSP endpoint Home Assistant could reach; HLS, "
-                "recording and casting are unavailable (live view is unaffected)"
+                "recording and casting are unavailable (live view is unaffected)",
             )
             return None
         self._endpoint = endpoint
         return endpoint
+
+    def _probe_trouble(self, reason: str, api_host: str) -> tuple[str, int] | None:
+        """A transient probe failure: cache nothing, re-probe next call."""
+        if api_host in _LOOPBACK_HOSTS:
+            _LOGGER.debug(
+                "go2rtc /api probe failed (%s); assuming the managed "
+                "instance's RTSP at %s:%d until a probe succeeds",
+                reason, *MANAGED_RTSP,
+            )
+            return MANAGED_RTSP
+        self._complain_once("probe", f"go2rtc /api probe failed ({reason})")
+        return None
 
     async def whep_answer(self, cam_id: str, offer_sdp: str) -> str | None:
         """Single-hop live view: negotiate the producer stream over WHEP.
@@ -199,8 +227,9 @@ class Restreamer:
             answer = await client.webrtc.forward_whep_sdp_offer(name, WebRTCSdpOffer(offer_sdp))
         except Exception as err:  # noqa: BLE001 - the camera turns None into a frontend error
             self._complain_once(
+                "whep",
                 f"WHEP against {name} failed ({describe_error(err)}); live view "
-                "is down until go2rtc recovers"
+                "is down until go2rtc recovers",
             )
             return None
         return answer.sdp
@@ -220,7 +249,9 @@ class Restreamer:
         try:
             return await client.get_jpeg_snapshot(name)
         except Exception as err:  # noqa: BLE001 - a failed still must never raise into the cache
-            self._complain_once(f"go2rtc frame grab for {name} failed ({describe_error(err)})")
+            self._complain_once(
+                "snapshot", f"go2rtc frame grab for {name} failed ({describe_error(err)})"
+            )
             return None
 
     async def _ensure_registered(self, cam_id: str) -> None:
@@ -241,6 +272,7 @@ class Restreamer:
                     _LOGGER.info("Registered go2rtc producer stream %s", name)
         except Exception as err:  # noqa: BLE001 - registration is best effort; the URL is stable
             self._complain_once(
+                "register",
                 f"Could not register go2rtc stream {name} ({describe_error(err)}); "
-                "will retry on the next frame grab or live view"
+                "will retry on the next frame grab or live view",
             )

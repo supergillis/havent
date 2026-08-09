@@ -207,3 +207,17 @@ def test_describe_error_survives_cause_cycles():
     a, b = ValueError("a"), ValueError("b")
     a.__cause__, b.__cause__ = b, a
     assert describe_error(a) == "ValueError: a <- caused by ValueError: b"
+
+
+def test_describe_error_redacts_query_strings():
+    """An HTTP error renders its request URL, and a failed streams PUT
+    carries the producer's ws source — token included — in the query."""
+    err = RuntimeError(
+        "400, message='Bad Request', "
+        "url='http://localhost:11984/api/streams?name=x&src=webrtc%3Aws%3A%2F%2F"
+        "127.0.0.1%3A38555%2Favent%2Fcam1%3Ft%3Dsecret-tok'"
+    )
+    text = describe_error(err)
+    assert "secret-tok" not in text
+    assert "<redacted>" in text
+    assert text.startswith("RuntimeError: 400, message='Bad Request'")

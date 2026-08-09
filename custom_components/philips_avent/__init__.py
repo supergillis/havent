@@ -424,5 +424,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     has no delete, and nothing dials an unpreloaded, unconsumed stream.
     """
     await _remove_bridge_config(hass, entry)
+    # Only entries with a stored camera list can be swept — the runtime dict
+    # is gone by removal time. A discovery-fallback entry without one leaves
+    # any preload behind, bounded by go2rtc's own restart.
     if camera_ids := [cam["id"] for cam in entry.data.get("cameras", [])]:
         await StreamPreloader(hass).async_disable(camera_ids)
