@@ -39,8 +39,9 @@ thing in the way.
 
 - **Removing `FrameCache` / flipping `use_stream_for_stills`.** Untouched. go2rtc's frame handler
   still stops the producer it dialled; the cache stays the guard against the ~360 sessions/hour
-  incident. Free win anyway: a frame grab's dial of the `_camera` stream now attaches to a hot
-  `_src` RTSP instead of opening a fresh Tuya session — evaluate cache removal separately.
+  incident. Free win anyway: a frame grab now hits `_src` directly (`Restreamer.snapshot`) and
+  attaches to a hot producer instead of opening a fresh Tuya session — evaluate cache removal
+  separately.
 - **Remote go2rtc support.** The signaling server binds loopback (`stream_server.py`), so a go2rtc
   on another host can't dial the producer today either. The degradation table covers it honestly;
   building for it is not worth it.
@@ -50,27 +51,28 @@ thing in the way.
 
 ## Design
 
-Two go2rtc streams per camera, with names that can never collide:
+One go2rtc stream carries everything for a builtin camera:
 
 ```
 philips_avent_<id>_src      ["webrtc:ws://127.0.0.1:38555/avent/<id>?t=<tok>",
   (ours, via PUT /api/streams)   "ffmpeg:philips_avent_<id>_src#audio=aac"]
-        ▲ RTSP (loopback)                  ▲ pulls _src's own RTSP, PCMU → AAC, on demand
-        │
-philips_avent_<id>_camera   [stream_source() result, "ffmpeg:..._camera#audio=opus"]
-  (HA's provider, as today)
+        ▲ RTSP (loopback): HA's stream component — HLS, camera.record, casts
+        ▲ WHEP: live view, negotiated by the camera entity itself
+        ▲ frame.jpeg: stills, at most once per FrameCache TTL
+
+philips_avent_<id>_camera   (HA's provider's name for a camera's stream. For builtin
+  cameras NO provider is attached at all — the entity is native WebRTC, see the live-view
+  section — so this stream exists only for add-on cameras, and as a stale leftover after an
+  upgrade, dying with go2rtc's next restart. The name must still never collide with ours.)
 ```
 
 - `stream_source()` returns `rtsp://127.0.0.1:<rtsp_port>/philips_avent_<id>_src?video&audio=aac`.
   The stream component gets H.264 + AAC and nothing else; go2rtc's RTSP consumer query filters
   codecs, so PyAV never sees the PCMU track and the "which audio track is first" ambiguity never
   arises.
-- HA's provider keeps doing what it does: it registers whatever `stream_source()` returns (any
-  scheme in `GET /api/schemes`; `rtsp` qualifies), re-adds only when no producer URL matches
-  (`go2rtc/__init__.py`), so upgrades self-heal on the next offer and a stable URL causes no churn.
 - go2rtc consuming its own loopback RTSP is not novel: HA's provider itself attaches
   `ffmpeg:<name>#audio=opus` — ffmpeg pulling go2rtc's own RTSP of that same stream — to every
-  camera it registers. This design does the same across two names.
+  camera it registers. `_src`'s AAC source is the same pattern, self-referencing one name.
 
 ### Audio
 
@@ -83,28 +85,43 @@ while something consumes AAC (a recording, an HLS viewer, a cast), not during pl
 Honesty note for the README: this is 8 kHz telephone-band G.711 re-wrapped as AAC. Recordings
 carry cries and voice fine; the transcode adds no fidelity the camera never sent.
 
-### Live view stays single-hop: the WHEP override
+### Live view: native WHEP, single hop — and no provider at all
 
-With `stream_source()` now RTSP, the provider's default path would make live view a chain —
-camera → `_src` → loopback RTSP → `_camera` → browser — and its audio a **double transcode**
-(PCMU → AAC → opus), because `_camera`'s source is the AAC-filtered RTSP URL. That downgrades the
-most-used feature to prop up the less-used ones, which violates the second goal. So the camera
-entity overrides `async_handle_async_webrtc_offer` to negotiate WHEP directly against `_src`
-(native H.264 + PCMU, one hop, zero transcode), exactly as the Frigate integration does against
-its go2rtc (`frigate-hass-integration/custom_components/frigate/camera.py`), using
-`go2rtc_client`'s WHEP forward (`forward_whep_sdp_offer(source_name, WebRTCSdpOffer) ->
-WebRTCSdpAnswer` — models, not strings). **In scope, not a stretch goal — but a
-separately-committed, separately-revertible task**, and any failure falls back to `super()` (the
-provider's double-hop path), so the worst case is inefficiency, never a black screen.
+With `stream_source()` now RTSP, letting HA's go2rtc provider drive live view would make it a
+chain — camera → `_src` → loopback RTSP → `_camera` → browser — and its audio a **double
+transcode** (PCMU → AAC → opus), because `_camera`'s source would be the AAC-filtered RTSP URL.
+That downgrades the most-used feature to prop up the less-used ones, which violates the second
+goal. So the builtin camera negotiates WHEP directly against `_src` (native H.264 + PCMU, one
+hop, zero transcode), as the Frigate integration does against its go2rtc
+(`frigate-hass-integration/custom_components/frigate/camera.py`), using `go2rtc_client`'s
+`forward_whep_sdp_offer(source_name, WebRTCSdpOffer) -> WebRTCSdpAnswer` — models, not strings.
 
-Session teardown must follow the offer: HA's websocket handler unconditionally calls
-`close_webrtc_session(session_id)`, and the base `Camera` delegates it to the go2rtc provider —
-which pops the session from its book-keeping **without a default**, so a session the provider
-never negotiated is a `KeyError` on every live-view teardown. The entity therefore tracks which
-session ids it delegated to `super()` and overrides `close_webrtc_session` to delegate only
-those; WHEP-negotiated sessions need only local bookkeeping, since a go2rtc WHEP session ends
-with its peer connection. Candidates are asymmetric and safe: the provider ignores
-unknown-session candidates at debug level, so `async_on_webrtc_candidate` needs no override.
+Overriding `async_handle_async_webrtc_offer` has a consequence HA makes non-negotiable: the
+entity becomes **native WebRTC**. HA detects the override at the *class* level
+(`homeassistant/components/camera/__init__.py`: `_supports_native_async_webrtc =
+type(self).async_handle_async_webrtc_offer != Camera.async_handle_async_webrtc_offer`) and then
+never attaches a WebRTC provider to the entity. Three things follow:
+
+- **No fallback exists.** A failed WHEP negotiation cannot fall back to the provider path — it is
+  unreachable by construction, not merely unbuilt. The entity sends `WebRTCError` to the frontend
+  and live view is down until go2rtc recovers.
+- **The override must not leak onto the add-on cameras**, whose live view IS the provider. The
+  builtin camera is therefore its own entity class (`AventBuiltinCamera`); the shared base keeps
+  no WebRTC overrides.
+- **Stills cannot use the provider either** (`webrtc_provider` is None on a native entity), so
+  the frame cache is fed by `Restreamer.snapshot` — go2rtc's `frame.jpeg` on `_src` — sharing a
+  hot producer for free, one Tuya session per cache miss when cold: the price the provider frame
+  path paid.
+
+Teardown and candidates, verified against HA core dev: the base `close_webrtc_session` is a
+**no-op when no provider is attached**, so it needs no override (an earlier draft tracked
+delegated sessions to dodge a provider `KeyError`; with no provider there is nothing to dodge).
+`async_on_webrtc_candidate` on the base *raises* for a provider-less camera, and the frontend
+trickles its local candidates regardless — so the entity overrides it as a documented no-op:
+WHEP returned a complete answer, candidates are noise.
+
+Still separately committed and separately revertible: a revert restores the provider path
+(double hop, provider-registered `_camera`, provider-served stills) with zero collateral.
 
 ### Finding the RTSP endpoint
 
@@ -151,11 +168,11 @@ list differs from the two sources above.
 Be precise about what re-invokes it, because HA's stream component does **not**: `Camera.
 async_create_stream` calls `stream_source()` at most once per entity lifetime and caches the
 `Stream` object (nothing calls `Stream.update_source`). The paths that actually re-run
-registration are: the provider's `_update_stream_source` — which calls `stream_source()` on
-every `async_get_image`, i.e. at most once per `FrameCache` TTL while dashboards poll; the WHEP
-override, on every live-view open; and a best-effort pass at entry setup (restoring the
-cold-start property: go2rtc knows the stream before the first dial). That coverage recovers from
-a go2rtc restart within one thumbnail cycle or one live-view open — and the frozen-`Stream` case
+registration are: the WHEP negotiation, on every live-view open; `Restreamer.snapshot`, at most
+once per `FrameCache` TTL while dashboards poll; and a best-effort pass at entry setup
+(restoring the cold-start property: go2rtc knows the stream before the first dial). That
+coverage recovers from a go2rtc restart within one thumbnail cycle or one live-view open — and
+the frozen-`Stream` case
 is defused by the stable-URL policy above: the cached RTSP URL never changes, so a stream opened
 during an outage starts working as soon as any of those paths re-registers `_src`.
 `manifest.json` gains `after_dependencies: ["go2rtc"]` so the setup pass stops racing go2rtc's

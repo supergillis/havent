@@ -445,59 +445,36 @@ behaviour changes.
 
 ---
 
-## Task 8: Single-hop live view — the WHEP override (separately revertible)
+## Task 8: Single-hop live view — native WHEP (separately revertible)
 
 Without this, live view is a double hop and its audio a PCMU→AAC→opus double transcode (the
 `_camera` source is the AAC-filtered RTSP). Frigate's integration is the precedent. One commit;
 revert restores the provider path with zero collateral.
 
-**Files:**
-- Modify: `custom_components/philips_avent/restream.py`, `camera.py`
-- Modify: `tests/test_philips_avent/test_restream.py`
+> **As built** (`ee86b5b` + the review fix `24c71a9`): the first cut of this task assumed the
+> WHEP override could coexist with HA's go2rtc provider — provider as fallback, teardown
+> bookkeeping to dodge the provider's session-`KeyError`. The final review refuted the premise:
+> HA flips a camera to **native WebRTC by class-level detection** of an
+> `async_handle_async_webrtc_offer` override and then never attaches a provider, so the
+> "fallback" raised, builtin stills (which read `webrtc_provider`) died, and the add-on cameras
+> would have lost their provider had they shared the class. What stands:
 
-- [ ] **Step 1: Failing tests** — `Restreamer.whep_answer(cam_id, offer_sdp)`: calls the fake
-client's `webrtc.forward_whep_sdp_offer(source_name, offer)` with `source_name ==
-go2rtc_producer_name(cam_id)` and an offer object carrying the SDP (the fake mirrors the real
-model-based signature: `WebRTCSdpOffer` in, `WebRTCSdpAnswer` out), after ensuring registration;
-returns the answer's `.sdp` string, or `None` (never raises) when go2rtc is absent,
-unregistered-and-unregistrable, or the WHEP call fails.
-
-- [ ] **Step 2: Implement** — `whep_answer` uses
-`go2rtc_rest_client(hass).webrtc.forward_whep_sdp_offer(name, WebRTCSdpOffer(offer_sdp))` and
-returns `answer.sdp` (WHEP: complete answer, no trickle). In `camera.py`, the offer handler plus
-the teardown bookkeeping it obligates:
-
-```python
-    async def async_handle_async_webrtc_offer(self, offer_sdp, session_id, send_message):
-        """Negotiate against the producer stream directly — one hop, native
-        PCMU — as frigate-hass-integration does. Any failure falls back to
-        HA's provider (double hop through the _camera stream): worse, never
-        broken."""
-        answer = None
-        if self._restreamer is not None:
-            answer = await self._restreamer.whep_answer(self._cam_id, offer_sdp)
-        if answer is None:
-            self._provider_sessions.add(session_id)
-            return await super().async_handle_async_webrtc_offer(offer_sdp, session_id, send_message)
-        send_message(WebRTCAnswer(answer))
-
-    def close_webrtc_session(self, session_id: str) -> None:
-        """HA's websocket handler calls this unconditionally on teardown,
-        and the go2rtc provider pops the session with no default — a
-        KeyError for any session it never negotiated. Delegate only the
-        sessions we actually gave it; a WHEP session ends with its peer
-        connection, so ours need nothing beyond the bookkeeping."""
-        if session_id in self._provider_sessions:
-            self._provider_sessions.discard(session_id)
-            super().close_webrtc_session(session_id)
-```
-
-`self._provider_sessions: set[str]` initialised in `__init__`. `async_on_webrtc_candidate` needs
-no override — the provider logs unknown-session candidates at debug and moves on (the safe half
-of an asymmetric API).
-
-- [ ] **Step 3: Tests pass; ruff clean**
-- [ ] **Step 4: Commit** — `feat(builtin): live view negotiates the producer stream directly`
+- [x] `Restreamer.whep_answer(cam_id, offer_sdp)` — real model signature
+  (`WebRTCSdpOffer` in, `.sdp` out), registration ensured first, never raises; `None` means the
+  camera sends the frontend a `WebRTCError` — there is no provider to fall back on.
+- [x] `AventBuiltinCamera(AventCamera)` — a separate class so the native override cannot strip
+  the add-on cameras of their provider. It owns `stream_source()` via the restreamer, the offer
+  handler, a documented **no-op `async_on_webrtc_candidate`** (the base raises on a
+  provider-less camera; WHEP answers are complete, no trickle), and stills via
+  `Restreamer.snapshot` (go2rtc `frame.jpeg` on `_src`) behind the unchanged `FrameCache`.
+- [x] **No `close_webrtc_session` override**: the base is a no-op when no provider is attached
+  (verified against HA core dev); the drafted delegated-session bookkeeping guarded a `KeyError`
+  that cannot occur in a native design and was deleted.
+- [x] Tests: WHEP negotiates `_src` with registration first; `None` on absent go2rtc; never
+  raises; snapshot success/failure/no-go2rtc. (The camera-entity halves — `WebRTCError` on
+  failure, candidate no-op — import `homeassistant.*` and are unreachable by this repo's
+  HA-free pytest setup; they are pinned by the spec and the field checklist instead.)
+- [x] Commits — `ee86b5b`, then `24c71a9` (the native rework)
 
 ---
 
@@ -532,3 +509,13 @@ of an asymmetric API).
 - [ ] **Redial pressure:** unplug the camera with a recording active; confirm the circuit breaker
   holds and the vendor app reconnects afterwards.
 - [ ] Watch for camera-entity availability flapping during cooldown windows (new semantics).
+- [ ] **Native-WebRTC frontend behavior:** live view opens, plays audio, and tears down cleanly
+  on a native session — including that the frontend's trickled candidates land in the no-op
+  override without errors, and that a WHEP failure surfaces as a frontend error message, not a
+  spinner. (The camera-entity code paths are untestable in this repo's HA-free pytest.)
+- [ ] **Provider-skip on the installed release:** confirm the running HA version skips provider
+  attachment for the overriding class (verified on core dev; the mechanism dates to the 2024.11
+  async-WebRTC refactor).
+- [ ] **Probe through local_auth:** confirm the bare `GET /api` probe succeeds over the managed
+  instance's unix-socket session with `local_auth` on the shipping release (verified on dev
+  source only).
