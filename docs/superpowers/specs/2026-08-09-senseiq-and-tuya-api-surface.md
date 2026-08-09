@@ -16,8 +16,8 @@ temperature — pushable over the LAN protocol. The device schema names them in 
 |----:|------|------|------|-----------|------------|
 | 1 | `sleepiq_switch` | SenseIQ on/off | bool rw | master enable | switch |
 | 2 | `cry_trans_switch` | Cry translation on/off | bool rw | enables the paid cry-AI | switch |
-| 3 | `sleepiq_status` | SenseIQ status | string ro | **live sleep/awake signal**, e.g. `{"r":"b","br":33}` | sensor |
-| 4 | `sleep_session_data` | Sleep session data | raw ro | current session: `{"st":<start>,"sd":<dur s>,"css":"d","cssd":<state dur>,"ssd":[{"l":302}]}` | sensor + attrs |
+| 3 | `sleepiq_status` | SenseIQ status | string ro | e.g. `{"r":"b","br":33}` — `br` = **breathing rate, confirmed**; `r` **unknown** (not the sleep state) | sensor + diag |
+| 4 | `sleep_session_data` | Sleep session data | raw ro | current session: `{"st":<start>,"sd":<dur s>,"css":"d","cssd":<state dur>,"ssd":[{"l":302}]}` — `css` = **sleep state** | sensor + attrs |
 | 5 | `sleepiq_consent` | SenseIQ consent | bool rw | GDPR consent flag | no |
 | 6 | `senseiq_diagnostics` | diagnostics | raw ro | opaque | no |
 | 7 | `sensiq_diag_consent` | diag consent | bool rw | — | no |
@@ -35,11 +35,21 @@ temperature — pushable over the LAN protocol. The device schema names them in 
 | 19 / 20 | `bu_logs` / `pu_logs` | base/parent-unit logs | raw ro | e.g. `{"type":"security","talkback_src":"app"}` | no |
 | 21 | `ext_functions` | Extended functions | value rw | feature bitmask | no |
 
-**The core SenseIQ signal is DPS 3 and DPS 4.** DPS 3 is the instantaneous state; DPS 4 is the
+**The core SenseIQ signal is DPS 3 and DPS 4.** DPS 3 is the instantaneous reading; DPS 4 is the
 current sleep session (start time, running duration, current sleep state `css` and a per-state
-timeline `ssd`). `css:"d"` and the `{"r":"b",…}` shape are undecoded — *inferred* to be sleep-stage
-codes; the exact vocabulary needs a few hours of watching the values change against known baby
-state. Cry translation (DPS 2/9/14/17) is the one genuinely cloud-backed, subscription-gated piece:
+timeline `ssd`). Paired observations against the app on the live monitor (2026-08-09, later the
+same day this spec was written) decoded most of the vocabulary:
+
+| Field | Value | Meaning | Status |
+|-------|-------|---------|--------|
+| DPS 3 `br` | number | breathing rate, breaths/min — app matched on every sample (27, 28, 30, 33) | **confirmed** |
+| DPS 4 `css` | `d` | deep sleep — app showed "deep sleep" at the moment `css` read `'d'` | **confirmed** |
+| DPS 4 `css` / `ssd` keys | `l` | light sleep — `ssd` alternates `l`/`d` as sleep cycles do; a real sample `[{l:302},{d:2258},{l:710},{d:286},{l:354}]` + `cssd=300` summed to `sd=4210` exactly | *inferred* |
+| DPS 3 `r` | `"b"` | **not** the sleep state: read `"b"` across an hour while the state changed underneath; best guess "baby detected" | **unknown** |
+
+So the sleep state lives in DPS 4 `css`, not DPS 3 `r` — the original guess that DPS 3 was the
+"live sleep/awake signal" was wrong. Cry translation (DPS 2/9/14/17) is the one genuinely
+cloud-backed, subscription-gated piece:
 it ships audio to `aispeech.tuyaeu.com` (seen in the user-info domain map) and is a free trial here.
 
 ## What we already use vs. what is there

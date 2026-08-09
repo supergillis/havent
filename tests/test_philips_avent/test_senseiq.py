@@ -10,10 +10,13 @@ import base64
 import json
 
 from senseiq import (
+    SLEEP_STATES,
+    breathing_rate,
     decode_senseiq_payload,
     session_attributes,
     session_duration,
     session_start,
+    sleep_state,
     status_attributes,
     status_code,
 )
@@ -29,6 +32,16 @@ LIVE_SESSION = {"st": 1786297106, "sd": 1864, "css": "d", "cssd": 1562, "ssd": [
 
 # Live DPS 3 values: plain JSON, unlike DPS 4.
 LIVE_STATUS = '{"r":"b","br":29}'
+
+# A later live DPS 4 sample (the recorded fields), several sleep cycles in:
+# the segments alternate l and d exactly as sleep cycles do, which is the
+# evidence behind reading `l` as light sleep, and the durations again sum to
+# `sd` exactly (302 + 2258 + 710 + 286 + 354 + 300 == 4210).
+LIVE_CYCLES = {
+    "sd": 4210,
+    "cssd": 300,
+    "ssd": [{"l": 302}, {"d": 2258}, {"l": 710}, {"d": 286}, {"l": 354}],
+}
 
 
 def b64(payload: dict) -> str:
@@ -113,13 +126,77 @@ class TestSessionDuration:
         assert session_duration({"sd": -1}) is None
 
 
+class TestSleepState:
+    def test_deep_is_confirmed(self):
+        # The app showed "deep sleep" at the moment css read 'd' (2026-08-09),
+        # which is also the state of the LIVE_SESSION sample.
+        assert sleep_state(LIVE_SESSION) == "deep"
+        assert sleep_state({"css": "d"}) == "deep"
+
+    def test_light_is_inferred_from_the_cycle_alternation(self):
+        assert sleep_state({"css": "l"}) == "light"
+
+    def test_unknown_codes_read_unknown_not_the_raw_letter(self):
+        # An unrecognised code must not look like a real state: None, so the
+        # ENUM sensor shows unknown instead of leaking a letter as a state.
+        assert sleep_state({"css": "a"}) is None
+        assert sleep_state({"css": "zz"}) is None
+        assert sleep_state({"css": "b"}) is None
+
+    def test_missing_or_bad(self):
+        assert sleep_state(None) is None
+        assert sleep_state({}) is None
+        assert sleep_state({"css": ""}) is None
+        assert sleep_state({"css": 3}) is None
+        assert sleep_state({"css": None}) is None
+
+    def test_surrounding_whitespace_is_tolerated(self):
+        assert sleep_state({"css": " d "}) == "deep"
+
+    def test_every_translated_state_is_an_enum_option(self):
+        # The ENUM sensor's options list must cover everything sleep_state can
+        # return, or HA raises on a valid state.
+        assert sleep_state({"css": "d"}) in SLEEP_STATES
+        assert sleep_state({"css": "l"}) in SLEEP_STATES
+
+    def test_live_cycle_sample_alternates_and_sums(self):
+        # The evidence for `l` = light: strict l/d alternation plus the same
+        # sd == Σssd + cssd arithmetic as every other sample.
+        keys = [next(iter(seg)) for seg in LIVE_CYCLES["ssd"]]
+        assert keys == ["l", "d", "l", "d", "l"]
+        segments = sum(next(iter(seg.values())) for seg in LIVE_CYCLES["ssd"])
+        assert segments + LIVE_CYCLES["cssd"] == LIVE_CYCLES["sd"]
+
+
+class TestBreathingRate:
+    def test_live_value(self):
+        # Confirmed field: the app's breathing-rate display matched `br` on
+        # every comparison (27, 28, 30, 33 observed).
+        assert breathing_rate(decode_senseiq_payload(LIVE_STATUS)) == 29
+
+    def test_other_observed_values(self):
+        for observed in (27, 28, 30, 33):
+            assert breathing_rate({"r": "b", "br": observed}) == observed
+
+    def test_zero_is_relayed_verbatim(self):
+        assert breathing_rate({"br": 0}) == 0
+
+    def test_missing_or_bad(self):
+        assert breathing_rate(None) is None
+        assert breathing_rate({}) is None
+        assert breathing_rate({"br": "fast"}) is None
+        assert breathing_rate({"br": True}) is None
+        assert breathing_rate({"br": -1}) is None
+
+
 class TestStatus:
     def test_live_code(self):
         assert status_code(decode_senseiq_payload(LIVE_STATUS)) == "b"
 
     def test_unknown_codes_pass_through_verbatim(self):
-        # The vocabulary is undecoded, so any non-empty string is relayed
-        # rather than mapped; interpretation is deliberately not attempted.
+        # `r` is not the sleep state (it held "b" while the state changed) and
+        # its vocabulary is undecoded, so any non-empty string is relayed
+        # verbatim as evidence; interpretation is deliberately not attempted.
         assert status_code({"r": "zz"}) == "zz"
 
     def test_missing_or_bad_code_reads_unknown(self):

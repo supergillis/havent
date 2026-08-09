@@ -24,8 +24,10 @@ Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, provid
 | 🔊 Sound Detected | Binary Sensor | Fires when sound is detected (auto-clears after 30s) |
 | 🔒 Privacy Mode | Switch | Camera on/off |
 | 😴 SenseIQ | Switch | Sleep tracking on/off |
-| 😴 SenseIQ Status | Sensor | The monitor's live sleep-tracking reading, relayed as its raw state code |
+| 😴 Sleep State | Sensor | Deep or light sleep (deep confirmed against the app; light inferred); unrecognised codes read unknown |
+| 🫁 Breathing Rate | Sensor | Breaths per minute, confirmed against the app's own reading |
 | 🛏️ Sleep Session | Sensors | Start time and running duration of the current sleep session |
+| 😴 SenseIQ Status | Sensor | Diagnostic; the raw `r` code of the status payload — not the sleep state, meaning unknown |
 | 📶 SenseIQ Signal Lost | Binary Sensor | Diagnostic; on while the monitor reports no SenseIQ signal |
 
 Multiple monitors on one Tuya account are supported: the bridge serves each camera from the same port on a distinct RTSP path derived from the camera's display name.
@@ -226,8 +228,8 @@ The integration uses the same Tuya Mobile SDK API as the official Philips Avent 
 | 139 | `decibel_switch` | Sound alert | on/off |
 | 237 | `privacy_switch` | Privacy mode | 0/1 |
 | 1 | `sleepiq_switch` | SenseIQ sleep tracking | on/off |
-| 3 | `sleepiq_status` | Live SenseIQ status | JSON, raw state code |
-| 4 | `sleep_session_data` | Current sleep session | start + duration + state timeline |
+| 3 | `sleepiq_status` | Live SenseIQ status | JSON: `br` = breathing rate (confirmed), `r` undecoded |
+| 4 | `sleep_session_data` | Current sleep session | start + duration + sleep state (`d`=deep confirmed, `l`=light inferred) + timeline |
 | 15 | `no_senseiq_signal` | No SenseIQ signal | true/false |
 
 Full reference: [examples/DPS_REFERENCE.md](examples/DPS_REFERENCE.md)

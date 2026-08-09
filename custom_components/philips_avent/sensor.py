@@ -11,6 +11,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    EntityCategory,
     UnitOfTemperature,
     UnitOfTime,
 )
@@ -22,10 +23,13 @@ from .const import DOMAIN, DPS_SENSEIQ_STATUS, DPS_SLEEP_SESSION, DPS_TEMPERATUR
 from .coordinator import PhilipsAventCoordinator
 from .entity import build_device_info
 from .senseiq import (
+    SLEEP_STATES,
+    breathing_rate,
     decode_senseiq_payload,
     session_attributes,
     session_duration,
     session_start,
+    sleep_state,
     status_attributes,
     status_code,
 )
@@ -39,6 +43,8 @@ async def async_setup_entry(
     for cam_id, coordinator in data["coordinators"].items():
         entities.append(AventTemperatureSensor(coordinator, cam_id))
         entities.append(AventWifiSignalSensor(coordinator, cam_id))
+        entities.append(AventSleepStateSensor(coordinator, cam_id))
+        entities.append(AventBreathingRateSensor(coordinator, cam_id))
         entities.append(AventSenseIQStatusSensor(coordinator, cam_id))
         entities.append(AventSleepSessionStartSensor(coordinator, cam_id))
         entities.append(AventSleepSessionDurationSensor(coordinator, cam_id))
@@ -88,19 +94,92 @@ class AventWifiSignalSensor(CoordinatorEntity, SensorEntity):
         return None
 
 
-class AventSenseIQStatusSensor(CoordinatorEntity, SensorEntity):
-    """The instantaneous SenseIQ reading (DPS 3), shown as the raw device code.
+class AventSleepStateSensor(CoordinatorEntity, SensorEntity):
+    """The baby's current sleep state (DPS 4 `css`), translated.
 
-    The state is the monitor's own letter code (only "b" observed so far), NOT
-    a translated asleep/awake value: the vocabulary is undecoded, and guessing
-    about a baby's sleep is the one thing this entity must never do. The rest
-    of the payload (e.g. `br`, seen moving between 29 and 33) rides along as
-    attributes verbatim, so history collects the material to decode it later.
+    `d` = deep sleep, confirmed against the Philips app on live hardware;
+    `l` = light sleep, inferred from the alternation of the segment timeline
+    (see senseiq.py). This is the entity people automate on, so it is a strict
+    ENUM: an unrecognised code reads unknown — senseiq.sleep_state returns
+    None, which HA passes through before it ever reaches the options check —
+    rather than leaking a raw letter that would look like a real state.
+
+    Carries the raw state timeline as attributes (`current_state` is the
+    untranslated letter, `current_state_duration` seconds in it, and
+    `state_segments` the completed earlier segments), since the timeline is
+    about states, not about the session duration it previously rode on.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Sleep State"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = SLEEP_STATES
+    _attr_icon = "mdi:sleep"
+
+    def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
+        super().__init__(coordinator)
+        self._cam_id = cam_id
+        self._attr_unique_id = f"{cam_id}_sleep_state"
+        self._attr_device_info = build_device_info(coordinator, cam_id)
+
+    @property
+    def _payload(self) -> dict | None:
+        dps = self.coordinator.data or {}
+        return decode_senseiq_payload(dps.get(DPS_SLEEP_SESSION))
+
+    @property
+    def native_value(self) -> str | None:
+        return sleep_state(self._payload)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return session_attributes(self._payload)
+
+
+class AventBreathingRateSensor(CoordinatorEntity, SensorEntity):
+    """The baby's breathing rate (DPS 3 `br`), in breaths per minute.
+
+    Confirmed against the app's own breathing-rate display: 27, 28, 30 and 33
+    all matched. HA has no device class for respiratory rate, so this is a
+    plain measurement with an explicit unit.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "Breathing Rate"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = "breaths/min"
+    _attr_suggested_display_precision = 0
+    _attr_icon = "mdi:lungs"
+
+    def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
+        super().__init__(coordinator)
+        self._cam_id = cam_id
+        self._attr_unique_id = f"{cam_id}_breathing_rate"
+        self._attr_device_info = build_device_info(coordinator, cam_id)
+
+    @property
+    def native_value(self) -> float | None:
+        dps = self.coordinator.data or {}
+        return breathing_rate(decode_senseiq_payload(dps.get(DPS_SENSEIQ_STATUS)))
+
+
+class AventSenseIQStatusSensor(CoordinatorEntity, SensorEntity):
+    """The raw `r` letter code of the DPS 3 status payload. Diagnostic.
+
+    What we know: `r` is NOT the sleep state — it read "b" across an hour of
+    samples while the sleep state (DPS 4 `css`) changed underneath it. What we
+    do not know: what "b" means; best guess "baby detected", unverified. Kept
+    as a diagnostic entity because it is the raw evidence a future decoding
+    needs, but it must not sit among the useful entities, and nothing should
+    automate on it. The rest of the payload rides along as attributes
+    verbatim, `br` included, even though breathing rate is now a first-class
+    sensor — the attribute is the untouched record.
     """
 
     _attr_has_entity_name = True
     _attr_name = "SenseIQ Status"
-    _attr_icon = "mdi:sleep"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:code-json"
 
     def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
         super().__init__(coordinator)
@@ -149,9 +228,9 @@ class AventSleepSessionDurationSensor(CoordinatorEntity, SensorEntity):
     """How long the current sleep session has been running (DPS 4 `sd`).
 
     Verified against the wall clock on live hardware: `sd` grew by exactly the
-    time between two polls. The undecoded per-state timeline (`css`, `cssd`,
-    `ssd` — whose durations sum to `sd` on every observed sample) is exposed as
-    raw attributes rather than interpreted.
+    time between two polls, and equals the sum of the segment timeline plus
+    `cssd` on every observed sample. The timeline itself lives on the Sleep
+    State sensor's attributes now, next to the state it describes.
     """
 
     _attr_has_entity_name = True
@@ -168,14 +247,6 @@ class AventSleepSessionDurationSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_info = build_device_info(coordinator, cam_id)
 
     @property
-    def _payload(self) -> dict | None:
-        dps = self.coordinator.data or {}
-        return decode_senseiq_payload(dps.get(DPS_SLEEP_SESSION))
-
-    @property
     def native_value(self) -> int | None:
-        return session_duration(self._payload)
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        return session_attributes(self._payload)
+        dps = self.coordinator.data or {}
+        return session_duration(decode_senseiq_payload(dps.get(DPS_SLEEP_SESSION)))

@@ -33,8 +33,8 @@ poll and LAN push as everything else. Schema read from a live SCD953
 |----|------|------|------|------|-------------|
 | 1 | `sleepiq_switch` | SenseIQ on/off | bool | rw | true/false |
 | 2 | `cry_trans_switch` | Cry translation on/off | bool | rw | true/false (subscription feature) |
-| 3 | `sleepiq_status` | Live SenseIQ status | string | ro | JSON, e.g. `{"r":"b","br":29}` — letter code undecoded |
-| 4 | `sleep_session_data` | Current sleep session | raw | ro | base64(hex(JSON)): `{"st":<epoch>,"sd":<s>,"css":"d","cssd":<s>,"ssd":[{"l":302}]}`; `sd = Σssd + cssd` |
+| 3 | `sleepiq_status` | Live SenseIQ status | string | ro | JSON, e.g. `{"r":"b","br":29}` — `br` = breathing rate in breaths/min (**confirmed**); `r` **unknown**, not the sleep state |
+| 4 | `sleep_session_data` | Current sleep session | raw | ro | base64(hex(JSON)): `{"st":<epoch>,"sd":<s>,"css":"d","cssd":<s>,"ssd":[{"l":302}]}`; `sd = Σssd + cssd`; `css` = sleep state |
 | 5 | `sleepiq_consent` | SenseIQ consent | bool | rw | GDPR consent flag |
 | 6 | `senseiq_diagnostics` | SenseIQ diagnostics | raw | ro | opaque |
 | 7 | `sensiq_diag_consent` | Diagnostics consent | bool | rw | true/false |
@@ -53,9 +53,20 @@ poll and LAN push as everything else. Schema read from a live SCD953
 | 20 | `pu_logs` | Parent unit logs | raw | ro | base64(hex(JSON)) |
 | 21 | `ext_functions` | Extended functions | value | rw | feature bitmask |
 
-The letter codes in DPS 3 (`r`) and DPS 4 (`css`, `ssd` entry keys) are the
-device's own sleep-state vocabulary and have not been decoded; the integration
-relays them verbatim rather than guessing at asleep/awake.
+The SenseIQ vocabulary, as far as paired observations against the Philips app
+have established it (live SCD953, 2026-08-09) — the labels matter, because they
+are the difference between evidence and a guess:
+
+| Field | Value | Meaning | Status |
+|-------|-------|---------|--------|
+| DPS 3 `br` | number | breathing rate, breaths per minute (27, 28, 30, 33 all matched the app) | **confirmed** |
+| DPS 4 `css` | `d` | deep sleep (app showed "deep sleep" at the same moment) | **confirmed** |
+| DPS 4 `css` / `ssd` keys | `l` | light sleep — the `ssd` segments alternate `l`/`d` exactly as sleep cycles do | *inferred* |
+| DPS 3 `r` | `"b"` | **not** the sleep state: held `"b"` for an hour while `css` changed; best guess "baby detected" | **unknown** |
+
+The integration translates only the confirmed/inferred codes (`d` → deep,
+`l` → light); anything else reads unknown, and `r` is relayed verbatim on a
+diagnostic entity rather than interpreted.
 
 ### Video & Image
 
