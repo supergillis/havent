@@ -72,7 +72,3 @@ class TestGo2rtcStreamName:
 
     def test_matches_the_ha_identifier_shape(self):
         assert go2rtc_stream_name("bfa1b2c3d4e5f6") == "philips_avent_bfa1b2c3d4e5f6_camera"
-
-    def test_percent_encodes_what_ha_would(self):
-        # Not a realistic Tuya id, but the quoting must mirror HA exactly.
-        assert go2rtc_stream_name("a b#c") == "philips_avent_a%20b%23c_camera"

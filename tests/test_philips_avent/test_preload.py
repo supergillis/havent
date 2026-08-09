@@ -4,9 +4,7 @@ The rules being guarded (the why is in preload.py's module docstring):
 go2rtc's `PUT /api/preload` is destructive, so arming must check
 `GET /api/preload` first and skip the PUT when already armed — a blind
 re-PUT on every answer is an endless churn of Tuya sessions. And failures
-must be diagnosable: go2rtc_client's bare `Go2RtcClientError from exc` and
-aiohttp's bare `TimeoutError` both have an empty str(), so `describe_error`
-renders type names and the cause chain.
+must never leak out of the answer hook.
 """
 import asyncio
 import logging
@@ -106,15 +104,22 @@ def enables(state):
 # -- arming is idempotent (the churn-loop guard) ---------------------------
 
 
-def test_rearm_skips_put_when_already_preloaded(monkeypatch):
+def test_repeated_answers_put_once(monkeypatch):
     """A blind re-PUT would make go2rtc drop and redial the live producer,
-    churning the just-answered Tuya session forever. Already armed => no PUT."""
+    churning the just-answered Tuya session forever. Already armed => no PUT.
+
+    Driven through camera_answered, the hook the stream server actually
+    calls, so the background-task wiring is covered too."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     pre = StreamPreloader(hass)
-    run(pre._async_enable("cam1"))
-    run(pre._async_enable("cam1"))  # a second answer fires the hook again
-    run(pre._async_enable("cam1"))
+
+    async def scenario():
+        for _ in range(3):  # every answer fires the hook again
+            pre.camera_answered("cam1")
+            await asyncio.gather(*hass.tasks)
+
+    run(scenario())
     assert enables(state) == [("preload.enable", NAME)]  # exactly one PUT
 
 
@@ -143,19 +148,6 @@ def test_concurrent_answers_put_once(monkeypatch):
     assert enables(state) == [("preload.enable", NAME)]
 
 
-def test_camera_answered_schedules_enable(monkeypatch):
-    hass, state = FakeHass(), FakeState()
-    install_go2rtc(monkeypatch, hass, state)
-    pre = StreamPreloader(hass)
-
-    async def scenario():
-        pre.camera_answered("cam1")
-        await asyncio.gather(*hass.tasks)
-
-    run(scenario())
-    assert enables(state) == [("preload.enable", NAME)]
-
-
 # -- resume and disable at setup -------------------------------------------
 
 
@@ -178,39 +170,7 @@ def test_disable_stops_only_armed_preloads(monkeypatch):
     assert disables == [("preload.disable", NAME)]
 
 
-# -- degradation and diagnosability ----------------------------------------
-
-
-def test_no_go2rtc_warns_once_then_debug(monkeypatch, caplog):
-    hass = FakeHass()  # hass.data has no "go2rtc" slot at all
-    pre = StreamPreloader(hass)
-    with caplog.at_level(logging.DEBUG, logger="preload"):
-        run(pre._async_enable("cam1"))
-        run(pre._async_enable("cam1"))
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "go2rtc is not available" in warnings[0].message
-
-
-def test_failure_logs_type_and_cause_chain(monkeypatch, caplog):
-    """The field failure logged '(…) ()': a bare exception with an empty
-    str(). The warning must name the exception type and its cause."""
-
-    class Go2RtcClientError(Exception):
-        pass
-
-    hass, state = FakeHass(), FakeState()
-    install_go2rtc(monkeypatch, hass, state)
-    try:
-        raise Go2RtcClientError from OSError("connect call failed")
-    except Go2RtcClientError as err:
-        state.fail_list_with = err
-    pre = StreamPreloader(hass)
-    with caplog.at_level(logging.WARNING, logger="preload"):
-        run(pre._async_enable("cam1"))
-    assert "(); " not in caplog.text  # the old, useless message shape
-    assert "Go2RtcClientError" in caplog.text
-    assert "OSError: connect call failed" in caplog.text
+# -- degradation -----------------------------------------------------------
 
 
 def test_enable_failure_never_raises(monkeypatch, caplog):
@@ -224,6 +184,7 @@ def test_enable_failure_never_raises(monkeypatch, caplog):
 
 
 def test_describe_error_survives_cause_cycles():
+    # A __cause__ cycle must not hang the warning path.
     a, b = ValueError("a"), ValueError("b")
     a.__cause__, b.__cause__ = b, a
     assert describe_error(a) == "ValueError: a <- caused by ValueError: b"

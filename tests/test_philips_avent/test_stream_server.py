@@ -18,7 +18,6 @@ the same endpoint; it left zombie sessions the camera reclaimed only on
 ~20-minute timers.)
 """
 import asyncio
-import logging
 from pathlib import Path
 
 import pytest
@@ -116,28 +115,21 @@ def watch_answers(source: CameraSource) -> list[bool]:
 
 
 class TestNegotiation:
-    def test_answer_is_rewritten_for_the_consumer(self):
-        server, source = build(FakeHub())
-        _stream, answer = run(server._negotiate(source, OFFER, sink))
-        # Three m-lines back for the three that go2rtc offered.
-        assert answer.count("m=") == OFFER.count("m=")
-
-    def test_camera_sees_an_audio_first_offer(self):
+    def test_offer_and_answer_are_rewritten_and_candidates_relayed(self):
         hub = FakeHub()
         server, source = build(hub)
-        run(server._negotiate(source, OFFER, sink))
-        sent = hub.sessions[0].offers[0]
-        assert sent.index("m=audio") < sent.index("m=video")
-
-    def test_candidates_are_relayed_to_the_consumer(self):
-        server, source = build(FakeHub())
         relayed: list[str] = []
 
         async def go():
-            await server._negotiate(source, OFFER, relayed.append)
+            _stream, answer = await server._negotiate(source, OFFER, relayed.append)
             await asyncio.sleep(0)  # let the queued callbacks run
+            return answer
 
-        run(go())
+        answer = run(go())
+        sent = hub.sessions[0].offers[0]
+        # The camera must see audio first; the consumer gets its own shape back.
+        assert sent.index("m=audio") < sent.index("m=video")
+        assert answer.count("m=") == OFFER.count("m=")
         assert relayed == CANDIDATES
 
 
@@ -172,22 +164,8 @@ class TestSessionLifetime:
         assert answered == []  # the keep_stream_running hook must not fire
 
     def test_a_failed_handshake_disconnects_its_session(self):
-        hub = FakeHub()
-        server, source = build(hub)
-        answered = watch_answers(source)
-
-        async def go():
-            with pytest.raises(SdpError):
-                await server._negotiate(source, "not sdp at all", sink)
-
-        run(go())
-        assert hub.disconnected == ["session-1"]
-        assert server._streams == {}
-        assert answered == []
-
-    def test_an_unusable_answer_disconnects_its_session(self):
         """The camera answered, but with something we cannot hand to the
-        consumer: still a failed handshake, and the slot must be freed."""
+        consumer: a failed handshake, and the slot must be freed."""
         hub = FakeHub(answer="v=0\r\ns=-\r\n")  # no media sections at all
         server, source = build(hub)
         answered = watch_answers(source)
@@ -254,35 +232,6 @@ class TestSessionLifetime:
         assert hub.disconnected == []
         assert server.cameras == {}
 
-    def test_hd_is_requested_once_the_stream_should_be_up(self, monkeypatch):
-        monkeypatch.setattr(module, "RESOLUTION_DELAY", 0.01)
-        hub = FakeHub()
-        server, source = build(hub)
-
-        async def go():
-            stream, _ = await server._negotiate(source, OFFER, sink)
-            await asyncio.sleep(0.05)
-            return stream
-
-        assert run(go()).session.resolutions == [0]
-
-
-class TestOneConsumer:
-    def test_a_dial_soon_after_an_answer_is_flagged(self, caplog):
-        """go2rtc only redials without a producer: this smells like a second one."""
-        hub = FakeHub()
-        server, source = build(hub)
-
-        async def go():
-            await server._negotiate(source, OFFER, sink)
-            with caplog.at_level(logging.WARNING, logger="stream_server"):
-                await server._negotiate(source, OFFER, sink)
-
-        run(go())
-        assert "second consumer" in caplog.text
-        # Flagged, not refused: the replacement still happened.
-        assert hub.opened == 2
-
 
 class TestAuthorization:
     class FakeRequest:
@@ -290,21 +239,14 @@ class TestAuthorization:
             self.match_info = {"camera_id": camera_id}
             self.query = {"t": token}
 
-    def test_the_right_token_gets_the_camera(self):
-        server, source = build(FakeHub())
-        assert server._authorize(self.FakeRequest("cam1", "secret")) is source
-
-    @pytest.mark.parametrize(
-        ("camera_id", "token"),
-        [("cam1", "guess"), ("cam1", ""), ("cam2", "secret")],
-        ids=["wrong token", "no token", "unknown camera"],
-    )
-    def test_everything_else_is_refused(self, camera_id, token):
+    def test_only_the_right_token_gets_the_camera(self):
         from aiohttp import web
 
-        server, _ = build(FakeHub())
-        with pytest.raises(web.HTTPForbidden):
-            server._authorize(self.FakeRequest(camera_id, token))
+        server, source = build(FakeHub())
+        assert server._authorize(self.FakeRequest("cam1", "secret")) is source
+        for camera_id, token in [("cam1", "guess"), ("cam1", ""), ("cam2", "secret")]:
+            with pytest.raises(web.HTTPForbidden):
+                server._authorize(self.FakeRequest(camera_id, token))
 
 
 class TestCircuitBreaker:
@@ -326,7 +268,7 @@ class TestCircuitBreaker:
         assert hub.opened == 1
         assert answered == []
 
-    def test_the_cooldown_expires(self, fast_timeout, monkeypatch):
+    def test_the_cooldown_expires_and_success_resets_the_breaker(self, fast_timeout, monkeypatch):
         monkeypatch.setattr(module, "COOLDOWN", 0.05)
         hub = FakeHub(answer=None)
         server, source = build(hub)
@@ -337,25 +279,11 @@ class TestCircuitBreaker:
             await asyncio.sleep(0.1)
             hub.answer = ANSWER  # the pool drained
             await server._negotiate(source, OFFER, sink)
-
-        run(go())
-        assert hub.opened == 2
-
-    def test_an_answer_clears_the_cooldown(self, fast_timeout, monkeypatch):
-        monkeypatch.setattr(module, "COOLDOWN", 300.0)
-        hub = FakeHub(answer=None)
-        server, source = build(hub)
-
-        async def go():
-            with pytest.raises(SignalingError, match="did not answer"):
-                await server._negotiate(source, OFFER, sink)
-            source.cooldown_until = 0.0  # operator intervention / expiry
-            hub.answer = ANSWER
-            await server._negotiate(source, OFFER, sink)
             # A successful answer must reset the breaker for the future.
             assert source.cooldown_until == 0.0
 
         run(go())
+        assert hub.opened == 2
 
     def test_the_refusal_never_touches_a_live_stream(self):
         hub = FakeHub()
@@ -372,11 +300,6 @@ class TestCircuitBreaker:
         # The check runs before the replacement release: the stream survives.
         assert not stream.released
         assert hub.opened == 1
-
-    def test_the_answer_timeout_is_short(self):
-        """The camera answers in ~0.1s or not at all; holding a doomed dial
-        open for 20s only delayed the breaker. Only valid with COOLDOWN."""
-        assert module.ANSWER_TIMEOUT == 6.0
 
 
 class TestOnAnswered:

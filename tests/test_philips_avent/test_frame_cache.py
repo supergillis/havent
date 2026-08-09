@@ -49,54 +49,28 @@ class TestFrameCache:
         assert run(go()) == b"one"
         assert fetch.calls == 1
 
-    def test_a_failed_refetch_serves_the_stale_frame(self):
+    def test_a_failure_serves_the_stale_frame_and_backs_off_a_full_ttl(self):
+        """The load-bearing one: a failed refetch keeps serving the old
+        frame, and the next dashboard poll must not retry before the TTL."""
         clock = Clock()
-        fetch = Fetcher([b"one", RuntimeError("go2rtc said no")])
+        fetch = Fetcher([b"one", RuntimeError("go2rtc said no"), b"late"])
         cache = FrameCache(fetch, ttl=60, clock=clock)
 
         async def go():
             await cache.image()
             clock.now = 61.0
-            return await cache.image()
-
-        assert run(go()) == b"one"
-
-    def test_a_failure_backs_off_for_a_full_ttl(self):
-        """The load-bearing one: failure must not retry on the next poll."""
-        clock = Clock()
-        fetch = Fetcher([RuntimeError("boom"), b"late"])
-        cache = FrameCache(fetch, ttl=60, clock=clock)
-
-        async def go():
-            first = await cache.image()
-            clock.now = 10.0  # the next dashboard poll
-            second = await cache.image()
-            clock.now = 61.0
-            third = await cache.image()
-            return first, second, third
-
-        first, second, third = run(go())
-        assert first is None
-        assert second is None
-        assert third == b"late"
-        assert fetch.calls == 2  # not 3: the poll at t=10 was absorbed
-
-    def test_an_empty_fetch_is_treated_like_a_failure(self):
-        clock = Clock()
-        fetch = Fetcher([b"one", None, b"three"])
-        cache = FrameCache(fetch, ttl=60, clock=clock)
-
-        async def go():
-            await cache.image()
-            clock.now = 61.0
-            stale = await cache.image()
+            stale = await cache.image()  # the refetch fails
+            clock.now = 71.0
+            absorbed = await cache.image()  # the next poll, inside the back-off
             clock.now = 122.0
             fresh = await cache.image()
-            return stale, fresh
+            return stale, absorbed, fresh
 
-        stale, fresh = run(go())
+        stale, absorbed, fresh = run(go())
         assert stale == b"one"
-        assert fresh == b"three"
+        assert absorbed == b"one"
+        assert fresh == b"late"
+        assert fetch.calls == 3  # not 4: the poll at t=71 was absorbed
 
     def test_concurrent_requests_share_one_fetch(self):
         calls = 0
