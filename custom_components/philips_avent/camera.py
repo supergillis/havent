@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.camera import (
+    Camera,
+    CameraEntityFeature,
+    WebRTCAnswer,
+    WebRTCSendMessage,
+)
 from homeassistant.components.ffmpeg import async_get_image as ffmpeg_get_image
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -84,6 +89,7 @@ class AventCamera(Camera):
         self._cam_id = cam_id
         self._stream_url = stream_url
         self._restreamer = restreamer
+        self._provider_sessions: set[str] = set()  # sessions delegated to HA's provider
         self._frame_cache = FrameCache(self._fetch_still, ttl=SNAPSHOT_TTL) if builtin else None
         self._attr_unique_id = f"{cam_id}_camera"
         self._attr_device_info = build_device_info(coordinator, cam_id)
@@ -107,6 +113,31 @@ class AventCamera(Camera):
         if self._restreamer is not None:
             return await self._restreamer.stream_url(self._cam_id)
         return self._stream_url
+
+    async def async_handle_async_webrtc_offer(
+        self, offer_sdp: str, session_id: str, send_message: WebRTCSendMessage
+    ) -> None:
+        """Negotiate against the producer stream directly — one hop, native
+        PCMU — as frigate-hass-integration does. Any failure falls back to
+        HA's provider (double hop through the _camera stream): worse, never
+        broken."""
+        answer = None
+        if self._restreamer is not None:
+            answer = await self._restreamer.whep_answer(self._cam_id, offer_sdp)
+        if answer is None:
+            self._provider_sessions.add(session_id)
+            return await super().async_handle_async_webrtc_offer(offer_sdp, session_id, send_message)
+        send_message(WebRTCAnswer(answer))
+
+    def close_webrtc_session(self, session_id: str) -> None:
+        """HA's websocket handler calls this unconditionally on teardown,
+        and the go2rtc provider pops the session with no default — a
+        KeyError for any session it never negotiated. Delegate only the
+        sessions we actually gave it; a WHEP session ends with its peer
+        connection, so ours need nothing beyond the bookkeeping."""
+        if session_id in self._provider_sessions:
+            self._provider_sessions.discard(session_id)
+            super().close_webrtc_session(session_id)
 
     async def _fetch_still(self) -> bytes | None:
         """One frame via go2rtc's frame path; the cache calls this at most once per TTL."""

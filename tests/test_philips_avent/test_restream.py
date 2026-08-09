@@ -11,6 +11,7 @@ import logging
 from functools import partial
 
 import preload as preload_mod
+import restream as restream_mod
 from const import builtin_stream_url
 from restream import MANAGED_RTSP, Restreamer, parse_rtsp_endpoint
 
@@ -43,6 +44,7 @@ class FakeState:
         self.probe_calls = 0
         self.fail_probe_with: BaseException | None = None
         self.fail_add_with: BaseException | None = None
+        self.fail_whep_with: BaseException | None = None
 
 
 class FakeProducer:
@@ -68,6 +70,26 @@ class FakeStreamsAPI:
         if self._state.fail_add_with is not None:
             raise self._state.fail_add_with
         self._state.streams[name] = FakeStream(list(sources))
+
+
+class FakeSdpModel:
+    """Mirrors go2rtc_client's WebRTCSdpOffer/WebRTCSdpAnswer: a model
+    carrying `.sdp`, not a bare string — the real forward_whep_sdp_offer
+    takes and returns models."""
+
+    def __init__(self, sdp):
+        self.sdp = sdp
+
+
+class FakeWebRTCAPI:
+    def __init__(self, state):
+        self._state = state
+
+    async def forward_whep_sdp_offer(self, source_name, offer):
+        self._state.calls.append(("webrtc.whep", source_name, offer.sdp))
+        if self._state.fail_whep_with is not None:
+            raise self._state.fail_whep_with
+        return FakeSdpModel("v=0 fake-answer")
 
 
 class FakeResponse:
@@ -110,8 +132,10 @@ def install_go2rtc(monkeypatch, hass, state, url="http://localhost:11984/"):
         def __init__(self, session, url):
             assert session is not None and url
             self.streams = FakeStreamsAPI(state)
+            self.webrtc = FakeWebRTCAPI(state)
 
     monkeypatch.setattr(preload_mod, "Go2RtcRestClient", FakeClient)
+    monkeypatch.setattr(restream_mod, "WebRTCSdpOffer", FakeSdpModel)
     hass.data["go2rtc"] = FakeConfig()
 
 
@@ -262,6 +286,37 @@ def test_registration_failure_still_returns_rtsp_url(monkeypatch, caplog):
         assert run(restreamer.stream_url("cam1")) == RTSP
         assert run(restreamer.stream_url("cam1")) == RTSP
     assert caplog.text.count("TimeoutError") == 1  # complained once
+
+
+# -- whep_answer: single-hop live view --------------------------------------
+
+
+def test_whep_answer_negotiates_the_producer(monkeypatch):
+    """The offer goes to the _src stream (one hop, native PCMU), as a model
+    carrying the SDP; registration is ensured first so a fresh go2rtc can
+    answer."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    answer = run(make_restreamer(hass).whep_answer("cam1", "v=0 offer"))
+    assert answer == "v=0 fake-answer"
+    assert ("webrtc.whep", SRC, "v=0 offer") in state.calls
+    assert adds(state) == [("streams.add", SRC, WANT)]  # registered before the offer
+
+
+def test_whep_answer_none_when_no_go2rtc(monkeypatch):
+    hass = FakeHass()  # hass.data empty
+    assert run(make_restreamer(hass).whep_answer("cam1", "v=0 offer")) is None
+
+
+def test_whep_answer_never_raises(monkeypatch, caplog):
+    """None means the caller falls back to HA's provider path — a double
+    hop is worse, a broken live view is unacceptable."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_whep_with = TimeoutError()
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        assert run(make_restreamer(hass).whep_answer("cam1", "v=0 offer")) is None
+    assert "TimeoutError" in caplog.text
 
 
 def test_probe_success_is_cached_transient_failure_is_not(monkeypatch):

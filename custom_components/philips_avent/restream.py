@@ -42,6 +42,11 @@ except ImportError:  # imported outside the package, e.g. by the tests
     from const import go2rtc_producer_name
     from preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
 
+try:
+    from go2rtc_client import WebRTCSdpOffer
+except ImportError:  # go2rtc integration (and its requirement) not installed
+    WebRTCSdpOffer = None  # type: ignore[assignment,misc]
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -170,6 +175,31 @@ class Restreamer:
             return None
         self._endpoint = endpoint
         return endpoint
+
+    async def whep_answer(self, cam_id: str, offer_sdp: str) -> str | None:
+        """Single-hop live view: negotiate the producer stream over WHEP.
+
+        The provider path would consume the AAC-filtered RTSP and transcode
+        PCMU→AAC→opus for every viewer; WHEP against `_src` keeps the native
+        audio and one hop, as frigate-hass-integration does. Registration is
+        ensured first so a freshly restarted go2rtc can answer. Returns None
+        — never raises — when go2rtc or the client model is missing or the
+        call fails: the caller falls back to HA's provider, which is worse
+        (double hop), never broken.
+        """
+        if (client := go2rtc_rest_client(self._hass)) is None or WebRTCSdpOffer is None:
+            return None
+        await self._ensure_registered(cam_id)
+        name = go2rtc_producer_name(cam_id)
+        try:
+            answer = await client.webrtc.forward_whep_sdp_offer(name, WebRTCSdpOffer(offer_sdp))
+        except Exception as err:  # noqa: BLE001 - fall back to the provider path
+            self._complain_once(
+                f"WHEP against {name} failed ({describe_error(err)}); live view "
+                "runs through HA's provider stream instead"
+            )
+            return None
+        return answer.sdp
 
     async def _ensure_registered(self, cam_id: str) -> None:
         """Check-then-PUT under the lock. PUT /api/streams silently replaces
