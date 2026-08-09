@@ -87,7 +87,6 @@ class AventCamera(Camera):
         self.coordinator = coordinator
         self._cam_id = cam_id
         self._stream_url = stream_url
-        self._builtin = builtin
         self._frame_cache = FrameCache(self._fetch_still, ttl=SNAPSHOT_TTL) if builtin else None
         self._attr_unique_id = f"{cam_id}_camera"
         self._attr_device_info = build_device_info(coordinator, cam_id)

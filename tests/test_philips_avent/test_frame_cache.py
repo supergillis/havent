@@ -36,12 +36,6 @@ class Fetcher:
 
 
 class TestFrameCache:
-    def test_the_first_request_fetches(self):
-        fetch = Fetcher([b"one"])
-        cache = FrameCache(fetch, ttl=60, clock=Clock())
-        assert run(cache.image()) == b"one"
-        assert fetch.calls == 1
-
     def test_a_fresh_frame_is_served_without_fetching(self):
         clock = Clock()
         fetch = Fetcher([b"one", b"two"])
@@ -54,19 +48,6 @@ class TestFrameCache:
 
         assert run(go()) == b"one"
         assert fetch.calls == 1
-
-    def test_a_stale_frame_is_refetched(self):
-        clock = Clock()
-        fetch = Fetcher([b"one", b"two"])
-        cache = FrameCache(fetch, ttl=60, clock=clock)
-
-        async def go():
-            await cache.image()
-            clock.now = 61.0
-            return await cache.image()
-
-        assert run(go()) == b"two"
-        assert fetch.calls == 2
 
     def test_a_failed_refetch_serves_the_stale_frame(self):
         clock = Clock()

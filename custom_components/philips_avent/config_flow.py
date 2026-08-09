@@ -408,23 +408,13 @@ class PhilipsAventOptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current_port = self.config_entry.options.get(
-            CONF_BRIDGE_PORT, DEFAULT_BRIDGE_PORT
-        )
-        current_host = self.config_entry.options.get(
-            CONF_BRIDGE_HOST, DEFAULT_BRIDGE_HOST
-        )
-        current_talkback = self.config_entry.options.get(
-            CONF_TALKBACK, DEFAULT_TALKBACK
-        )
         options = self.config_entry.options
+        current_port = options.get(CONF_BRIDGE_PORT, DEFAULT_BRIDGE_PORT)
+        current_host = options.get(CONF_BRIDGE_HOST, DEFAULT_BRIDGE_HOST)
+        current_talkback = options.get(CONF_TALKBACK, DEFAULT_TALKBACK)
         current_backend = options.get(CONF_STREAM_BACKEND, DEFAULT_STREAM_BACKEND)
-        current_signaling_port = options.get(
-            CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT
-        )
-        current_keep_running = options.get(
-            CONF_KEEP_STREAM_RUNNING, DEFAULT_KEEP_STREAM_RUNNING
-        )
+        current_signaling_port = options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT)
+        current_keep_running = options.get(CONF_KEEP_STREAM_RUNNING, DEFAULT_KEEP_STREAM_RUNNING)
 
         return self.async_show_form(
             step_id="init",

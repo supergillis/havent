@@ -101,12 +101,9 @@ Then open, on the tablet:
 http://<home-assistant>:11984/stream.html?src=philips_avent_<camera-id>_camera&mode=webrtc
 ```
 
-The stream name is how Home Assistant registers the camera with go2rtc: the platform name, the
-entity's unique id, joined with underscores. Media still goes camera → viewer directly; only the
-handshake passes through. Note the managed go2rtc enables no `hls` or `mp4` module and its API
-allowlist excludes `/api/stream.mjpeg`, so **WebRTC is the mode that works** — MSE, HLS and MJPEG
-all 404. If you want those, or an RTSP URL on the LAN, run your own go2rtc (1.9.13 or newer) and
-point Home Assistant at it with `go2rtc: url:`.
+**WebRTC is the only mode that works** there — the managed go2rtc enables no MSE, HLS or MJPEG.
+If you want those, or an RTSP URL on the LAN, run your own go2rtc (1.9.13 or newer) and point
+Home Assistant at it with `go2rtc: url:`.
 
 ### Add-on (WebRTC Bridge)
 

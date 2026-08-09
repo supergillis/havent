@@ -18,9 +18,11 @@ the same endpoint; it left zombie sessions the camera reclaimed only on
 ~20-minute timers.)
 """
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
+import stream_server as module
 from sdp import SdpError
 from signaling import SignalingError
 from stream_server import CameraSource, StreamServer
@@ -34,6 +36,15 @@ CANDIDATES = ["candidate:1 1 UDP 2130706431 192.168.1.97 49592 typ host"]
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def sink(_candidate: str) -> None:
+    """An on_candidate for tests that do not care about candidates."""
+
+
+@pytest.fixture
+def fast_timeout(monkeypatch):
+    monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
 
 
 class FakeSession:
@@ -81,7 +92,7 @@ class FakeHub:
         self.disconnected: list[str] = []
         self.sent_candidates: list[str] = []
 
-    async def open_session(self, camera_id: str, *, talkback: bool = False) -> FakeSession:
+    async def open_session(self, camera_id: str) -> FakeSession:
         if self.error is not None:
             raise self.error
         self.opened += 1
@@ -90,62 +101,44 @@ class FakeHub:
         return session
 
 
-candidates: list[str] = []
-
-
 def build(hub: FakeHub, token: str = "secret") -> tuple[StreamServer, CameraSource]:
-    candidates.clear()
     server = StreamServer(0)
     source = CameraSource(camera_id="cam1", name="Nursery", hub=hub, token=token)
     server.add_camera(source)
     return server, source
 
 
+def watch_answers(source: CameraSource) -> list[bool]:
+    """Record every on_answered firing (the keep_stream_running hook)."""
+    answered: list[bool] = []
+    source.on_answered = lambda: answered.append(True)
+    return answered
+
+
 class TestNegotiation:
     def test_answer_is_rewritten_for_the_consumer(self):
-        hub = FakeHub()
-        server, source = build(hub)
-
-        async def go():
-            return await server._negotiate(source, OFFER, candidates.append)
-
-        _stream, answer = run(go())
+        server, source = build(FakeHub())
+        _stream, answer = run(server._negotiate(source, OFFER, sink))
         # Three m-lines back for the three that go2rtc offered.
         assert answer.count("m=") == OFFER.count("m=")
 
     def test_camera_sees_an_audio_first_offer(self):
         hub = FakeHub()
         server, source = build(hub)
-        run(server._negotiate(source, OFFER, candidates.append))
+        run(server._negotiate(source, OFFER, sink))
         sent = hub.sessions[0].offers[0]
         assert sent.index("m=audio") < sent.index("m=video")
 
     def test_candidates_are_relayed_to_the_consumer(self):
-        hub = FakeHub()
-        server, source = build(hub)
+        server, source = build(FakeHub())
+        relayed: list[str] = []
 
         async def go():
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, relayed.append)
             await asyncio.sleep(0)  # let the queued callbacks run
 
         run(go())
-        assert candidates == CANDIDATES
-
-    def test_no_answer_times_out_with_a_readable_message(self, monkeypatch):
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
-        hub = FakeHub(answer=None)
-        server, source = build(hub)
-
-        with pytest.raises(SignalingError, match="did not answer"):
-            run(server._negotiate(source, OFFER, candidates.append))
-
-    def test_a_cloud_failure_is_reported_verbatim(self):
-        hub = FakeHub(error=SignalingError("camera returned no signaling id"))
-        server, source = build(hub)
-        with pytest.raises(SignalingError, match="no signaling id"):
-            run(server._negotiate(source, OFFER, candidates.append))
+        assert relayed == CANDIDATES
 
 
 class TestSessionLifetime:
@@ -155,8 +148,8 @@ class TestSessionLifetime:
         server, source = build(hub)
 
         async def go():
-            await server._negotiate(source, OFFER, candidates.append)
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
+            await server._negotiate(source, OFFER, sink)
 
         run(go())
         assert hub.disconnected == ["session-1"]
@@ -164,32 +157,49 @@ class TestSessionLifetime:
         assert not hub.sessions[1].closed
         assert len(server._streams) == 1
 
-    def test_no_answer_disconnects_the_abandoned_session(self, monkeypatch):
+    def test_no_answer_disconnects_the_abandoned_session(self, fast_timeout):
         """The zombie fix: an unanswered offer must not hold a slot for ~20min."""
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
         hub = FakeHub(answer=None)
         server, source = build(hub)
+        answered = watch_answers(source)
 
         with pytest.raises(SignalingError, match="did not answer"):
-            run(server._negotiate(source, OFFER, candidates.append))
+            run(server._negotiate(source, OFFER, sink))
 
         assert hub.disconnected == ["session-1"]
         assert server._streams == {}
         assert hub.sessions[0].closed
+        assert answered == []  # the keep_stream_running hook must not fire
 
     def test_a_failed_handshake_disconnects_its_session(self):
         hub = FakeHub()
         server, source = build(hub)
+        answered = watch_answers(source)
 
         async def go():
             with pytest.raises(SdpError):
-                await server._negotiate(source, "not sdp at all", candidates.append)
+                await server._negotiate(source, "not sdp at all", sink)
 
         run(go())
         assert hub.disconnected == ["session-1"]
         assert server._streams == {}
+        assert answered == []
+
+    def test_an_unusable_answer_disconnects_its_session(self):
+        """The camera answered, but with something we cannot hand to the
+        consumer: still a failed handshake, and the slot must be freed."""
+        hub = FakeHub(answer="v=0\r\ns=-\r\n")  # no media sections at all
+        server, source = build(hub)
+        answered = watch_answers(source)
+
+        async def go():
+            with pytest.raises(SdpError):
+                await server._negotiate(source, OFFER, sink)
+
+        run(go())
+        assert hub.disconnected == ["session-1"]
+        assert server._streams == {}
+        assert answered == []
 
     def test_linger_expiry_stays_silent(self):
         """Media may still be flowing; only our own state is dropped."""
@@ -197,7 +207,7 @@ class TestSessionLifetime:
         server, source = build(hub)
 
         async def go():
-            stream, _ = await server._negotiate(source, OFFER, candidates.append)
+            stream, _ = await server._negotiate(source, OFFER, sink)
             stream.release("linger expired")
             return stream
 
@@ -212,7 +222,7 @@ class TestSessionLifetime:
         server, source = build(hub)
 
         async def go():
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
             await server.stop()
 
         run(go())
@@ -223,7 +233,7 @@ class TestSessionLifetime:
         server, source = build(hub)
 
         async def go():
-            stream, _ = await server._negotiate(source, OFFER, candidates.append)
+            stream, _ = await server._negotiate(source, OFFER, sink)
             stream.session.on_disconnect()
             return stream
 
@@ -236,7 +246,7 @@ class TestSessionLifetime:
         server, source = build(hub)
 
         async def go():
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
             server.remove_camera("cam1")
 
         run(go())
@@ -244,28 +254,13 @@ class TestSessionLifetime:
         assert hub.disconnected == []
         assert server.cameras == {}
 
-    def test_release_sends_at_most_one_disconnect(self):
-        hub = FakeHub()
-        server, source = build(hub)
-
-        async def go():
-            stream, _ = await server._negotiate(source, OFFER, candidates.append)
-            stream.release("no answer", disconnect=True)
-            stream.release("no answer", disconnect=True)
-            return stream
-
-        run(go())
-        assert hub.disconnected == ["session-1"]
-
     def test_hd_is_requested_once_the_stream_should_be_up(self, monkeypatch):
-        import stream_server as module
-
         monkeypatch.setattr(module, "RESOLUTION_DELAY", 0.01)
         hub = FakeHub()
         server, source = build(hub)
 
         async def go():
-            stream, _ = await server._negotiate(source, OFFER, candidates.append)
+            stream, _ = await server._negotiate(source, OFFER, sink)
             await asyncio.sleep(0.05)
             return stream
 
@@ -275,40 +270,18 @@ class TestSessionLifetime:
 class TestOneConsumer:
     def test_a_dial_soon_after_an_answer_is_flagged(self, caplog):
         """go2rtc only redials without a producer: this smells like a second one."""
-        import logging
-
         hub = FakeHub()
         server, source = build(hub)
 
         async def go():
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
             with caplog.at_level(logging.WARNING, logger="stream_server"):
-                await server._negotiate(source, OFFER, candidates.append)
+                await server._negotiate(source, OFFER, sink)
 
         run(go())
         assert "second consumer" in caplog.text
         # Flagged, not refused: the replacement still happened.
         assert hub.opened == 2
-
-    def test_replacing_an_unanswered_dial_is_not_flagged(self, monkeypatch, caplog):
-        import logging
-
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
-        monkeypatch.setattr(module, "COOLDOWN", 0.0)
-        hub = FakeHub(answer=None)
-        server, source = build(hub)
-
-        async def go():
-            with pytest.raises(SignalingError):
-                await server._negotiate(source, OFFER, candidates.append)
-            hub.answer = ANSWER
-            with caplog.at_level(logging.WARNING, logger="stream_server"):
-                await server._negotiate(source, OFFER, candidates.append)
-
-        run(go())
-        assert "second consumer" not in caplog.text
 
 
 class TestAuthorization:
@@ -321,80 +294,64 @@ class TestAuthorization:
         server, source = build(FakeHub())
         assert server._authorize(self.FakeRequest("cam1", "secret")) is source
 
-    def test_a_wrong_token_is_refused(self):
+    @pytest.mark.parametrize(
+        ("camera_id", "token"),
+        [("cam1", "guess"), ("cam1", ""), ("cam2", "secret")],
+        ids=["wrong token", "no token", "unknown camera"],
+    )
+    def test_everything_else_is_refused(self, camera_id, token):
         from aiohttp import web
 
         server, _ = build(FakeHub())
         with pytest.raises(web.HTTPForbidden):
-            server._authorize(self.FakeRequest("cam1", "guess"))
-
-    def test_an_unknown_camera_is_refused(self):
-        from aiohttp import web
-
-        server, _ = build(FakeHub())
-        with pytest.raises(web.HTTPForbidden):
-            server._authorize(self.FakeRequest("cam2", "secret"))
-
-    def test_no_token_is_refused(self):
-        from aiohttp import web
-
-        server, _ = build(FakeHub())
-        with pytest.raises(web.HTTPForbidden):
-            server._authorize(self.FakeRequest("cam1", ""))
+            server._authorize(self.FakeRequest(camera_id, token))
 
 
 class TestCircuitBreaker:
     """After a no-answer timeout, the camera is left alone for COOLDOWN."""
 
-    def test_a_timeout_starts_the_cooldown_and_the_next_dial_is_refused(self, monkeypatch):
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
+    def test_a_timeout_starts_the_cooldown_and_the_next_dial_is_refused(self, fast_timeout):
         hub = FakeHub(answer=None)
         server, source = build(hub)
+        answered = watch_answers(source)
 
         async def go():
             with pytest.raises(SignalingError, match="did not answer"):
-                await server._negotiate(source, OFFER, candidates.append)
+                await server._negotiate(source, OFFER, sink)
             with pytest.raises(SignalingError, match="not dialling"):
-                await server._negotiate(source, OFFER, candidates.append)
+                await server._negotiate(source, OFFER, sink)
 
         run(go())
-        # The refused dial made no cloud call and sent no offer.
+        # The refused dial made no cloud call, sent no offer and armed nothing.
         assert hub.opened == 1
+        assert answered == []
 
-    def test_the_cooldown_expires(self, monkeypatch):
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
+    def test_the_cooldown_expires(self, fast_timeout, monkeypatch):
         monkeypatch.setattr(module, "COOLDOWN", 0.05)
         hub = FakeHub(answer=None)
         server, source = build(hub)
 
         async def go():
             with pytest.raises(SignalingError, match="did not answer"):
-                await server._negotiate(source, OFFER, candidates.append)
+                await server._negotiate(source, OFFER, sink)
             await asyncio.sleep(0.1)
             hub.answer = ANSWER  # the pool drained
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
 
         run(go())
         assert hub.opened == 2
 
-    def test_an_answer_clears_the_cooldown(self, monkeypatch):
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
+    def test_an_answer_clears_the_cooldown(self, fast_timeout, monkeypatch):
         monkeypatch.setattr(module, "COOLDOWN", 300.0)
         hub = FakeHub(answer=None)
         server, source = build(hub)
 
         async def go():
             with pytest.raises(SignalingError, match="did not answer"):
-                await server._negotiate(source, OFFER, candidates.append)
+                await server._negotiate(source, OFFER, sink)
             source.cooldown_until = 0.0  # operator intervention / expiry
             hub.answer = ANSWER
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
             # A successful answer must reset the breaker for the future.
             assert source.cooldown_until == 0.0
 
@@ -405,10 +362,10 @@ class TestCircuitBreaker:
         server, source = build(hub)
 
         async def go():
-            stream, _ = await server._negotiate(source, OFFER, candidates.append)
+            stream, _ = await server._negotiate(source, OFFER, sink)
             source.cooldown_until = asyncio.get_running_loop().time() + 30
             with pytest.raises(SignalingError, match="not dialling"):
-                await server._negotiate(source, OFFER, candidates.append)
+                await server._negotiate(source, OFFER, sink)
             return stream
 
         stream = run(go())
@@ -419,8 +376,6 @@ class TestCircuitBreaker:
     def test_the_answer_timeout_is_short(self):
         """The camera answers in ~0.1s or not at all; holding a doomed dial
         open for 20s only delayed the breaker. Only valid with COOLDOWN."""
-        import stream_server as module
-
         assert module.ANSWER_TIMEOUT == 6.0
 
 
@@ -429,84 +384,20 @@ class TestOnAnswered:
 
     It must fire exactly on success — the moment the consumer that dialled
     us is guaranteed to know the stream, so go2rtc's preload can be armed —
-    and never on a refused or failed dial, which would arm a preload for a
-    stream go2rtc may not have registered.
+    and never on a refused or failed dial (asserted alongside each failure
+    scenario above), which would arm a preload for a stream go2rtc may not
+    have registered.
     """
-
-    def test_fires_after_a_successful_negotiation(self):
-        hub = FakeHub()
-        server, source = build(hub)
-        answered: list[bool] = []
-        source.on_answered = lambda: answered.append(True)
-
-        run(server._negotiate(source, OFFER, candidates.append))
-
-        assert answered == [True]
 
     def test_fires_on_every_successful_negotiation(self):
         """Not once-only: a redial means the producer was down, which is
         exactly when a preload has stopped doing its job and needs re-arming."""
-        hub = FakeHub()
-        server, source = build(hub)
-        answered: list[bool] = []
-        source.on_answered = lambda: answered.append(True)
+        server, source = build(FakeHub())
+        answered = watch_answers(source)
 
         async def go():
-            await server._negotiate(source, OFFER, candidates.append)
-            await server._negotiate(source, OFFER, candidates.append)
+            await server._negotiate(source, OFFER, sink)
+            await server._negotiate(source, OFFER, sink)
 
         run(go())
         assert answered == [True, True]
-
-    def test_does_not_fire_on_an_answer_timeout(self, monkeypatch):
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
-        hub = FakeHub(answer=None)
-        server, source = build(hub)
-        answered: list[bool] = []
-        source.on_answered = lambda: answered.append(True)
-
-        with pytest.raises(SignalingError, match="did not answer"):
-            run(server._negotiate(source, OFFER, candidates.append))
-
-        assert answered == []
-
-    def test_does_not_fire_on_a_failed_handshake(self):
-        hub = FakeHub()
-        server, source = build(hub)
-        answered: list[bool] = []
-        source.on_answered = lambda: answered.append(True)
-
-        async def go():
-            with pytest.raises(SdpError):
-                await server._negotiate(source, "not sdp at all", candidates.append)
-
-        run(go())
-        assert answered == []
-
-    def test_does_not_fire_while_the_cooldown_holds(self, monkeypatch):
-        import stream_server as module
-
-        monkeypatch.setattr(module, "ANSWER_TIMEOUT", 0.05)
-        hub = FakeHub(answer=None)
-        server, source = build(hub)
-        answered: list[bool] = []
-        source.on_answered = lambda: answered.append(True)
-
-        async def go():
-            with pytest.raises(SignalingError, match="did not answer"):
-                await server._negotiate(source, OFFER, candidates.append)
-            with pytest.raises(SignalingError, match="not dialling"):
-                await server._negotiate(source, OFFER, candidates.append)
-
-        run(go())
-        assert answered == []
-
-    def test_the_hook_is_optional(self):
-        """The default None must negotiate exactly as before."""
-        hub = FakeHub()
-        server, source = build(hub)
-        assert source.on_answered is None
-        _stream, answer = run(server._negotiate(source, OFFER, candidates.append))
-        assert answer

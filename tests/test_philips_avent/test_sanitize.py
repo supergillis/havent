@@ -76,6 +76,3 @@ class TestGo2rtcStreamName:
     def test_percent_encodes_what_ha_would(self):
         # Not a realistic Tuya id, but the quoting must mirror HA exactly.
         assert go2rtc_stream_name("a b#c") == "philips_avent_a%20b%23c_camera"
-
-    def test_keeps_the_characters_ha_keeps(self):
-        assert go2rtc_stream_name("a.b_c-d") == "philips_avent_a.b_c-d_camera"

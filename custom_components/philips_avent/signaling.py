@@ -135,11 +135,9 @@ class SignalingHub:
 
     # -- sessions ----------------------------------------------------------
 
-    async def open_session(
-        self, camera_id: str, *, resolution: str = "hd", talkback: bool = False
-    ) -> Session:
+    async def open_session(self, camera_id: str) -> Session:
         """Cloud handshake for one camera, then a live session on the broker."""
-        session = Session(self, camera_id, resolution=resolution, talkback=talkback)
+        session = Session(self, camera_id)
         await session.prepare()
         await self._connect()
         self._sessions[session.session_id] = session
@@ -178,18 +176,9 @@ class Session:
     be flowing.
     """
 
-    def __init__(
-        self,
-        hub: SignalingHub,
-        camera_id: str,
-        *,
-        resolution: str = "hd",
-        talkback: bool = False,
-    ) -> None:
+    def __init__(self, hub: SignalingHub, camera_id: str) -> None:
         self.hub = hub
         self.camera_id = camera_id
-        self.resolution = resolution
-        self.talkback = talkback
         self.session_id = secrets.token_hex(16)
         self.ice_servers: list[dict[str, Any]] = []
 
@@ -224,7 +213,7 @@ class Session:
         self._topic = f"/av/moto/{self._moto_id}/u/{self.camera_id}"
 
         skill = _parse_skill(config.get("skill"))
-        self._stream_type = _stream_type(skill, self.resolution)
+        self._stream_type = _stream_type(skill)
         if _is_hevc(skill, self._stream_type):
             raise SignalingError(
                 "this camera streams HEVC, which the built-in backend cannot relay"
@@ -244,7 +233,10 @@ class Session:
 
     # -- outbound ----------------------------------------------------------
 
-    def _publish(self, kind: str, protocol: int, body: dict[str, Any], session_id: str) -> None:
+    def _publish(self, kind: str, protocol: int, body: dict[str, Any]) -> None:
+        """Publish one frame. Always names our own session: the header's
+        sessionid is how the camera scopes every frame, disconnect included,
+        and there is deliberately no way to name someone else's."""
         self.hub.publish(self._topic, {
             "protocol": protocol,
             "pv": "2.2",
@@ -255,7 +247,7 @@ class Session:
                     "from": self.hub.uid,
                     "to": self.camera_id,
                     "sub_dev_id": "",
-                    "sessionid": session_id,
+                    "sessionid": self.session_id,
                     "moto_id": self._moto_id,
                     "tid": "",
                     "seq": 0,
@@ -274,19 +266,19 @@ class Session:
             "token": self.ice_servers,
             "replay": {"is_replay": 0},
             "datachannel_enable": False,
-        }, self.session_id)
+        })
 
     def send_candidate(self, candidate: str) -> None:
         self._publish("candidate", PROTOCOL_SESSION, {
             "mode": "webrtc",
             "candidate": candidate if candidate.startswith("a=") else f"a={candidate}",
-        }, self.session_id)
+        })
 
     def send_resolution(self, value: int = 0) -> None:
         """0 = HD, 1 = SD. Sent once the peer connection should be up."""
         self._publish("resolution", PROTOCOL_CONTROL, {
             "mode": "webrtc", "cmdValue": value,
-        }, self.session_id)
+        })
 
     def send_disconnect(self) -> None:
         """Tell the camera this session is over, freeing its pool slot.
@@ -296,7 +288,7 @@ class Session:
         Matches the Go bridge (`bridge.go` `Stop()`) and go2rtc's own
         `pkg/tuya`, which both send it for their own session at teardown.
         """
-        self._publish("disconnect", PROTOCOL_SESSION, {"mode": "webrtc"}, self.session_id)
+        self._publish("disconnect", PROTOCOL_SESSION, {"mode": "webrtc"})
 
     def close(self) -> None:
         self.hub.release(self)
@@ -324,19 +316,19 @@ def _parse_skill(raw: str | None) -> dict[str, Any]:
         return {}
 
 
-def _stream_type(skill: dict[str, Any], resolution: str) -> int:
-    """Which of the camera's streams to ask for.
+def _stream_type(skill: dict[str, Any]) -> int:
+    """The camera's highest-resolution stream.
 
     Carried over from the Go bridge verbatim, including the default: this field
     is the skill's own `streamType` (2 for the main stream, 4 for the sub
-    stream on the models seen so far), not an index.
+    stream on the models seen so far), not an index. SD is switched at runtime
+    with `send_resolution`, not by picking the sub stream here.
     """
     videos = skill.get("videos") or []
     if not videos:
         return 1
-    by_pixels = sorted(videos, key=lambda video: video.get("width", 0) * video.get("height", 0))
-    chosen = by_pixels[-1] if resolution == "hd" else by_pixels[0]
-    return chosen.get("streamType", 1)
+    largest = max(videos, key=lambda video: video.get("width", 0) * video.get("height", 0))
+    return largest.get("streamType", 1)
 
 
 def _is_hevc(skill: dict[str, Any], stream_type: int) -> bool:

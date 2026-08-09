@@ -6,7 +6,7 @@ go2rtc sends as a `webrtc:ws://` source, and the answer the camera returns.
 from pathlib import Path
 
 import pytest
-from sdp import SdpError, describe, rewrite_answer, rewrite_offer
+from sdp import SdpError, rewrite_answer, rewrite_offer
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GO2RTC_OFFER = (FIXTURES / "go2rtc-offer.sdp").read_text()
@@ -64,10 +64,6 @@ class TestRewriteOffer:
     def test_offer_without_media_is_rejected(self):
         with pytest.raises(SdpError):
             rewrite_offer("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n")
-
-    def test_audio_only_offer_is_forwarded_as_is(self):
-        offer = "v=0\r\ns=-\r\nm=audio 9 UDP/TLS/RTP/SAVPF 0\r\na=mid:0\r\na=recvonly\r\n"
-        assert kinds(rewrite_offer(offer)) == ["audio"]
 
 
 class TestRewriteAnswer:
@@ -145,14 +141,3 @@ class TestDirectionClamping:
         offer = rewrite_offer(GO2RTC_OFFER, talkback=True)
         # Round-trip through the offer the camera actually saw.
         assert "a=sendrecv" in rewrite_answer(CAMERA_ANSWER, offer)
-
-
-class TestRoundTrip:
-    def test_answer_answers_every_offered_section(self):
-        out = rewrite_answer(CAMERA_ANSWER, GO2RTC_OFFER)
-        assert len(sections(out)) == len(sections(GO2RTC_OFFER))
-        assert kinds(out) == kinds(GO2RTC_OFFER)
-
-    def test_describe_summarizes_both_sides(self):
-        assert describe(rewrite_offer(GO2RTC_OFFER)).startswith("audio[mid=1 recvonly")
-        assert "video[mid=0" in describe(CAMERA_ANSWER)

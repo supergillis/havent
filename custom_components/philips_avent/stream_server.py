@@ -40,10 +40,11 @@ still be flowing: linger expiry, config entry unload, server stop.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from aiohttp import WSMsgType, web
 
@@ -94,8 +95,8 @@ class CameraSource:
     #: before it can arm go2rtc's preload. A plain callback so this module
     #: stays HA-free: the Home Assistant side passes it in (see preload.py).
     on_answered: Callable[[], None] | None = None
-    last_error: str | None = field(default=None, compare=False)
-    cooldown_until: float = field(default=0.0, compare=False)
+    last_error: str | None = None
+    cooldown_until: float = 0.0
 
 
 class Stream:
@@ -211,7 +212,7 @@ class StreamServer:
                 )
             previous.release("replaced by a new stream", disconnect=True)
 
-        session = await source.hub.open_session(source.camera_id, talkback=source.talkback)
+        session = await source.hub.open_session(source.camera_id)
         stream = Stream(self, source.camera_id, session)
         self._streams[source.camera_id] = stream
 
@@ -232,6 +233,9 @@ class StreamServer:
 
             async with asyncio.timeout(ANSWER_TIMEOUT):
                 camera_answer = await answer
+            # Inside the try on purpose: an answer we cannot rewrite is a
+            # failed handshake too, and must free its slot like one.
+            consumer_answer = rewrite_answer(camera_answer, offer)
         except TimeoutError as err:
             source.cooldown_until = loop.time() + COOLDOWN
             stream.release("no answer", disconnect=True)
@@ -246,15 +250,17 @@ class StreamServer:
         source.cooldown_until = 0.0
         stream.answered_at = loop.time()
         _LOGGER.debug("%s answered %s", source.name, describe(camera_answer))
-        consumer_answer = rewrite_answer(camera_answer, offer)
 
         stream.after(RESOLUTION_DELAY, session.send_resolution)
         stream.after(LINGER, lambda: stream.release("linger expired"))
         if source.on_answered is not None:
-            # Every answer, not just the first: our consumer only redials
-            # when it has no producer, which is exactly when a preload has
-            # stopped doing its job (go2rtc restarted, or HA's provider
-            # disabled it) and needs re-arming.
+            # Every answer, not just the first: a preload can stop doing
+            # its job behind our back (go2rtc restarted, or HA's provider
+            # disabled it), and the next answer is when we find out. The
+            # callback must be idempotent — preload.py checks whether the
+            # preload is still armed before re-arming, because go2rtc's
+            # preload PUT tears down and redials the producer, i.e. the
+            # very session that just answered.
             source.on_answered()
         return stream, consumer_answer
 
@@ -276,6 +282,12 @@ class StreamServer:
         stream: Stream | None = None
         early: list[str] = []
         answered = False
+        sends: set[asyncio.Task] = set()
+
+        async def send_candidate(candidate: str) -> None:
+            # Suppressed: the socket can close between relay's check and the send.
+            with contextlib.suppress(ConnectionResetError):
+                await ws.send_json({"type": "webrtc/candidate", "value": candidate})
 
         def relay(candidate: str) -> None:
             if not answered:
@@ -285,9 +297,10 @@ class StreamServer:
                 # Expected: go2rtc drops the socket once ICE is up, and the
                 # camera keeps trickling.
                 return
-            asyncio.get_running_loop().create_task(
-                ws.send_json({"type": "webrtc/candidate", "value": candidate})
-            )
+            # Keep a reference until done, or the task can be GC'd mid-send.
+            task = asyncio.get_running_loop().create_task(send_candidate(candidate))
+            sends.add(task)
+            task.add_done_callback(sends.discard)
 
         try:
             async for message in ws:

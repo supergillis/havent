@@ -142,7 +142,7 @@ async def _remove_orphan_bridge_configs(hass: HomeAssistant) -> None:
         )
 
 
-def stream_token(hass: HomeAssistant, entry: ConfigEntry) -> str:
+def _stream_token(hass: HomeAssistant, entry: ConfigEntry) -> str:
     """The secret in the signaling URL, minted once and kept.
 
     Persisted rather than regenerated so the URL handed to go2rtc survives a
@@ -190,7 +190,7 @@ async def _async_start_streaming(
             device_id=api.device_id,
         ),
     )
-    token = stream_token(hass, entry)
+    token = _stream_token(hass, entry)
     talkback = entry.options.get(CONF_TALKBACK, DEFAULT_TALKBACK)
 
     for cam in cameras:
