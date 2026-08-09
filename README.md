@@ -78,7 +78,7 @@ Settings → Devices & Services → Philips Avent → Configure.
 | Works on HA Container / Core | Only if you run the bridge yourself | Yes, if go2rtc is available |
 | Camera entity | Yes, over RTSP | Yes, over WebRTC |
 | Snapshots | ffmpeg on the RTSP stream | go2rtc's own frame grab |
-| HLS, `camera.record`, casting | Yes | No |
+| HLS, `camera.record`, casting | Yes | Yes, via go2rtc's RTSP |
 | Two-way audio | Yes | Not yet |
 | A URL to watch outside HA | `rtsp://…:38554/<name>` in VLC | go2rtc's own page (see below) |
 
@@ -86,6 +86,14 @@ The built-in backend does the Tuya signaling inside Home Assistant and lets the 
 already ships carry the video, so the camera talks straight to go2rtc over your LAN and nothing else
 runs. Home Assistant only bundles go2rtc for container-based installs; on HA Core in a venv, install
 go2rtc yourself and point HA at it with `go2rtc: url:` in `configuration.yaml`.
+
+Recordings, HLS and casts carry sound: the camera's G.711 audio is transcoded to AAC on its way
+through go2rtc. It remains 8 kHz telephone-band audio — cries and voices come through fine; the
+transcode adds no fidelity the camera never sent. The video fans out from one camera session over
+go2rtc's loopback RTSP, which is unauthenticated: any process on the Home Assistant host can read
+the stream. If you enabled `keep_stream_running`, turn it off before downgrading the integration —
+older versions stop only the stream name they know, and go2rtc would keep the camera streaming for
+nobody.
 
 **Run one or the other, never both on the same account.** Both derive the same Tuya MQTT client id
 and will knock each other off the broker. Switching to the built-in backend deletes the add-on's

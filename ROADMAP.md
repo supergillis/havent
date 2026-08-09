@@ -11,7 +11,9 @@ belong on this list.
 
 - **Streaming without the add-on works.** Tuya signalling runs in Python inside the integration and
   Home Assistant's bundled go2rtc terminates the media, so video goes camera → go2rtc directly over
-  the LAN. Behind the `stream_backend` option, default `addon`.
+  the LAN. Behind the `stream_backend` option, default `addon`. With the go2rtc RTSP restream, HLS,
+  `camera.record` and casting work here too — the add-on's remaining advantage is field time, not
+  features.
 - **SenseIQ is readable.** Sleep state, breathing rate, session start and duration, sensing status,
   and switches for the three alerts.
 - **The camera's session pool is the thing to respect.** It holds 3-5 sessions, forcibly closes new
@@ -78,9 +80,6 @@ belong on this list.
 
 ## Known limits of the built-in backend
 
-- No HLS, no `camera.record`, no casting: go2rtc's RTSP is loopback-only and the stream source is
-  not an RTSP URL. Home Assistant still advertises HLS and logs `Protocol not found` when something
-  asks for it.
 - HEVC cameras are unsupported. The Avent models are H.264.
 - Home Assistant only bundles go2rtc for container installs. On Home Assistant Core in a venv you
   need your own go2rtc and `go2rtc: url:`.
