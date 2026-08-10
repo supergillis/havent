@@ -65,21 +65,27 @@ SLEEP_STATE_CODES = {
 SLEEP_STATES = [SLEEP_STATE_DEEP, SLEEP_STATE_LIGHT]
 
 SENSING_STATUS_BREATHING = "breathing"
+SENSING_STATUS_MOVEMENT = "movement"
 
 # The decoded sensing-status vocabulary for DPS 3 `r`. The documented value
 # set is moving / breathing / no-signal / out-of-crib / analyzing (APK
-# strings, `bm_sleepIQ_pricacy_explain_content`), but only `b` = breathing is
-# pinned to a letter so far. The unobserved letters stay unmapped on purpose
-# and translate to None; the future labels are expected to be `moving`,
-# `no_signal`, `out_of_crib` and `analyzing`, so an observation slots in as
-# one dict entry plus one options entry.
+# strings, `bm_sleepIQ_pricacy_explain_content`); two letters are pinned by
+# paired observation so far. `b` = breathing (documented, and consistent with
+# every live sample). `m` = movement: live SCD953, 2026-08-10 21:22 — the
+# device sent `{"r":"m","br":0}` for one poll while the vendor app showed
+# "Movement" (hence the label "movement", the app's word, not the APK
+# enumeration's "moving"). The unobserved letters stay unmapped on purpose
+# and translate to None; `no_signal`, `out_of_crib` and `analyzing` are still
+# waiting, and an observation slots in as one dict entry plus one options
+# entry.
 SENSING_STATUS_CODES = {
     "b": SENSING_STATUS_BREATHING,
+    "m": SENSING_STATUS_MOVEMENT,
 }
 
 # The closed set of translated statuses, for the ENUM sensor's `options` —
 # same safety property as SLEEP_STATES: an unmapped code becomes unknown.
-SENSING_STATUSES = [SENSING_STATUS_BREATHING]
+SENSING_STATUSES = [SENSING_STATUS_BREATHING, SENSING_STATUS_MOVEMENT]
 
 
 def decode_senseiq_payload(raw: object) -> dict | None:
@@ -197,8 +203,9 @@ def sensing_status(payload: dict | None) -> str | None:
     A different axis from the DPS 4 sleep stage: it says what SenseIQ is
     currently reading off the crib, not how deeply the baby sleeps. The
     documented value set is moving / breathing / no-signal / out-of-crib /
-    analyzing; only `b` = "breathing" is pinned to a letter (documented, and
-    consistent with every live sample). Anything else — missing, non-string,
+    analyzing; `b` = "breathing" and `m` = "movement" are pinned to letters
+    (see SENSING_STATUS_CODES for the evidence). Anything else — missing,
+    non-string,
     or an unobserved code — is None, never the raw letter: the caller exposes
     this as an ENUM state, and HA returns early on None but rejects any state
     outside `options`, so an unmapped code must read unknown, not leak.

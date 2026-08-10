@@ -16,7 +16,7 @@ temperature — pushable over the LAN protocol. The device schema names them in 
 |----:|------|------|------|-----------|------------|
 | 1 | `sleepiq_switch` | SenseIQ on/off | bool rw | master enable | switch |
 | 2 | `cry_trans_switch` | Cry translation on/off | bool rw | enables the paid cry-AI | switch |
-| 3 | `sleepiq_status` | SenseIQ status | string ro | e.g. `{"r":"b","br":33}` — `br` = **breathing rate, confirmed**; `r` = **live sensing status** (`b`=breathing), *documented*, not the sleep stage | sensors (breathing rate + sensing status) |
+| 3 | `sleepiq_status` | SenseIQ status | string ro | e.g. `{"r":"b","br":33}` — `br` = **breathing rate, confirmed**; `r` = **live sensing status** (`b`=breathing, *documented*; `m`=movement, **confirmed 2026-08-10**: `{"r":"m","br":0}` while the app showed "Movement" — note `br` reads 0 during movement), not the sleep stage | sensors (breathing rate + sensing status) |
 | 4 | `sleep_session_data` | Sleep session data | raw ro | current session: `{"st":<start>,"sd":<dur s>,"css":"d","cssd":<state dur>,"ssd":[{"l":302}]}` — `css` = **sleep state** | sensor + attrs |
 | 5 | `sleepiq_consent` | SenseIQ consent | bool rw | GDPR consent flag | no |
 | 6 | `senseiq_diagnostics` | diagnostics | raw ro | opaque | no |

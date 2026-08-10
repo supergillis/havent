@@ -200,12 +200,19 @@ class TestSensingStatus:
         assert sensing_status(decode_senseiq_payload(LIVE_STATUS)) == "breathing"
         assert sensing_status({"r": "b"}) == "breathing"
 
+    def test_movement_code_translates_to_movement(self):
+        # `m` = movement, pinned by paired observation on the live SCD953
+        # (2026-08-10 21:22): the device sent {"r":"m","br":0} for one poll
+        # while the vendor app showed "Movement". The label is the app's
+        # word, not the APK enumeration's "moving".
+        assert sensing_status({"r": "m", "br": 0}) == "movement"
+        assert sensing_status({"r": "m"}) == "movement"
+
     def test_unmapped_codes_read_unknown_not_the_raw_letter(self):
-        # Only `b` is pinned to a label; the other documented statuses have
-        # never been observed here, so their letters are unknown. An unmapped
-        # code must be None — the ENUM sensor shows unknown — never the raw
+        # `b` and `m` are pinned; the other documented statuses have never
+        # been observed here, so their letters are unknown. An unmapped code
+        # must be None — the ENUM sensor shows unknown — never the raw
         # letter passing as a state.
-        assert sensing_status({"r": "m"}) is None
         assert sensing_status({"r": "zz"}) is None
         assert sensing_status({"r": "d"}) is None
 
@@ -219,6 +226,7 @@ class TestSensingStatus:
         # The ENUM sensor's options list must cover everything sensing_status
         # can return, or HA raises on a valid state.
         assert sensing_status({"r": "b"}) in SENSING_STATUSES
+        assert sensing_status({"r": "m"}) in SENSING_STATUSES
 
     def test_raw_code_is_kept_verbatim_for_attributes(self):
         assert status_code(decode_senseiq_payload(LIVE_STATUS)) == "b"

@@ -170,9 +170,11 @@ class AventSensingStatusSensor(CoordinatorEntity, SensorEntity):
     DPS 4 stage: this says what the camera reads off the crib right now, not
     how deeply the baby sleeps. The documented value set (APK strings of the
     same Baby Monitor+ app, github.com/eisbaw/babymonitor-client) is moving /
-    breathing / no-signal / out-of-crib / analyzing; only `b` = "breathing"
-    is pinned to a letter so far — documented, and consistent with every live
-    sample, which held `b` for an hour while the stage cycled. It is a real
+    breathing / no-signal / out-of-crib / analyzing; `b` = "breathing" and
+    `m` = "movement" are pinned so far (evidence in SENSING_STATUS_CODES;
+    `b` held for an hour of live sampling while the stage cycled, `m` was
+    caught by this sensor's own unknown-plus-raw-attribute discipline and
+    paired with the app showing "Movement"). It is a real
     signal, not a diagnostic, so it sits with the other sensors. Same strict
     ENUM discipline as Sleep State: an unobserved code reads unknown —
     senseiq.sensing_status returns None, which HA passes through before the
