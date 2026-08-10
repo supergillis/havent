@@ -63,7 +63,8 @@
           "talkback": "Two-way audio (talkback)",
           "stream_backend": "Video backend",
           "signaling_port": "Built-in backend port",
-          "keep_stream_running": "Keep the stream permanently connected"
+          "keep_stream_running": "Keep the stream permanently connected",
+          "lan_player": "Serve the LAN player page"
         },
         "data_description": {
           "bridge_host": "Where Home Assistant can reach the WebRTC bridge. Leave it as localhost when you use the add-on; set the container name or IP address if you run the bridge yourself, elsewhere.",
@@ -71,7 +72,8 @@
           "talkback": "Leave this off unless a client of yours actually talks back through the stream. Asking the camera for two-way audio makes the monitor stop a playing lullaby and restart it from the beginning when you close the stream.",
           "stream_backend": "\"addon\" streams through the aventproxy bridge add-on. \"builtin\" needs no container: Home Assistant relays the signaling itself and its bundled go2rtc carries the video. Stop the add-on when you switch to builtin, they cannot share one account.",
           "signaling_port": "Port the built-in backend listens on (default: 38555)",
-          "keep_stream_running": "Built-in backend only. The camera streams to Home Assistant continuously over your LAN, whether or not anyone is watching — in exchange the stream opens instantly and the camera's small session pool holds a single long-lived session instead of one per viewing, the way the add-on bridge always worked. After a Home Assistant restart the stream goes hot again at the first view or dashboard thumbnail."
+          "keep_stream_running": "Built-in backend only. The camera streams to Home Assistant continuously over your LAN, whether or not anyone is watching — in exchange the stream opens instantly and the camera's small session pool holds a single long-lived session instead of one per viewing, the way the add-on bridge always worked. After a Home Assistant restart the stream goes hot again at the first view or dashboard thumbnail.",
+          "lan_player": "Built-in backend only. Opens the signaling server to your LAN and serves a standalone player page that streams straight from the camera — no Home Assistant frontend, no go2rtc. Anyone on your LAN holding a player link can watch: the link's token is the only lock. One consumer per camera: the player and a Home Assistant live view replace each other."
         }
       }
     }

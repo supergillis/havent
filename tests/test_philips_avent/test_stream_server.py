@@ -324,3 +324,49 @@ class TestOnAnswered:
 
         run(go())
         assert answered == [True, True]
+
+
+class TestPlayerPage:
+    """The LAN player: same token gate as the ws endpoint, secrets stay
+    client-side (the page reads cam id and token from its own URL), and the
+    server only interpolates the display name — escaped, because it comes
+    from the Tuya account."""
+
+    class FakeRequest:
+        def __init__(self, camera_id: str, token: str):
+            self.match_info = {"camera_id": camera_id}
+            self.query = {"t": token}
+
+    def test_wrong_or_missing_token_is_refused(self):
+        from aiohttp import web
+
+        server, _source = build(FakeHub())
+        for camera_id, token in [("cam1", "guess"), ("cam1", ""), ("cam2", "secret")]:
+            with pytest.raises(web.HTTPForbidden):
+                run(server._handle_player(self.FakeRequest(camera_id, token)))
+
+    def test_the_page_is_served_with_the_name_escaped(self):
+        server, source = build(FakeHub())
+        source.name = "Nursery <b>&</b>"
+        response = run(server._handle_player(self.FakeRequest("cam1", "secret")))
+        assert response.status == 200
+        assert response.content_type == "text/html"
+        assert "Nursery &lt;b&gt;&amp;&lt;/b&gt;" in response.text
+        assert "<b>" not in response.text.replace("<body>", "")
+        # No secret is baked into the page: the JS derives the ws URL from
+        # location, so the token appears only in the visitor's own URL bar.
+        assert "secret" not in response.text
+
+    def test_the_page_speaks_the_ws_protocol(self):
+        # Belt and braces on the protocol strings the JS must emit/consume;
+        # the page has no build step, so this is the only machine check.
+        server, _source = build(FakeHub())
+        response = run(server._handle_player(self.FakeRequest("cam1", "secret")))
+        for needle in ("webrtc/offer", "webrtc/answer", "webrtc/candidate", "/avent/"):
+            assert needle in response.text
+
+
+class TestBind:
+    def test_loopback_is_the_default_and_lan_is_optional(self):
+        assert StreamServer(0).bind == "127.0.0.1"
+        assert StreamServer(0, bind="0.0.0.0").bind == "0.0.0.0"

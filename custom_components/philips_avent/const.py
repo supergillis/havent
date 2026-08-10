@@ -173,6 +173,18 @@ CONF_STREAM_TOKEN = "stream_token"
 CONF_KEEP_STREAM_RUNNING = "keep_stream_running"
 DEFAULT_KEEP_STREAM_RUNNING = False
 
+# Serve the standalone browser player (player.py) and open the signaling
+# server to the LAN for it. Off by default, and the trade is real: turning it
+# on rebinds the socket from loopback to 0.0.0.0, after which the stream
+# token in the URL is the only gate — anyone on the LAN holding a player link
+# can watch and can open camera sessions. In exchange the page negotiates
+# WebRTC with the camera directly, so a tablet keeps its picture when
+# go2rtc — or Home Assistant's frontend — does not. Only meaningful on the
+# builtin backend. One camera, one consumer: the player and an HA live view
+# replace each other's sessions.
+CONF_LAN_PLAYER = "lan_player"
+DEFAULT_LAN_PLAYER = False
+
 
 def uses_builtin_backend(options) -> bool:
     """Whether these entry options stream through Home Assistant, not the add-on."""

@@ -49,10 +49,12 @@ from dataclasses import dataclass
 from aiohttp import WSMsgType, web
 
 try:
+    from . import player
     from .sdp import SdpError, describe, rewrite_answer, rewrite_offer
     from .signaling import Session as TuyaSession
     from .signaling import SignalingError, SignalingHub
 except ImportError:  # imported outside the package, e.g. by the tests
+    import player
     from sdp import SdpError, describe, rewrite_answer, rewrite_offer
     from signaling import Session as TuyaSession
     from signaling import SignalingError, SignalingHub
@@ -166,6 +168,7 @@ class StreamServer:
     async def start(self) -> None:
         app = web.Application()
         app.router.add_get("/avent/{camera_id}", self._handle_offer)
+        app.router.add_get("/player/{camera_id}", self._handle_player)
 
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
@@ -188,6 +191,16 @@ class StreamServer:
         if source is None or not secrets.compare_digest(request.query.get("t", ""), source.token):
             raise web.HTTPForbidden(text="unknown camera or bad token")
         return source
+
+    async def _handle_player(self, request: web.Request) -> web.Response:
+        """The LAN player page (player.py): same token gate as the ws path.
+
+        Reachable off-host only when the `lan_player` option rebound the
+        server to the LAN; on the default loopback bind this route exists
+        but serves nobody the ws endpoint could not already serve.
+        """
+        source = self._authorize(request)
+        return web.Response(text=player.render(source.name), content_type="text/html")
 
     async def _negotiate(
         self, source: CameraSource, offer: str, on_candidate: Callable[[str], None]

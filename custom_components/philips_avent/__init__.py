@@ -20,6 +20,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_ECODE,
     CONF_KEEP_STREAM_RUNNING,
+    CONF_LAN_PLAYER,
     CONF_PARTNER,
     CONF_SID,
     CONF_SIGNALING_PORT,
@@ -27,6 +28,7 @@ from .const import (
     CONF_TALKBACK,
     DEFAULT_BRIDGE_PORT,
     DEFAULT_KEEP_STREAM_RUNNING,
+    DEFAULT_LAN_PLAYER,
     DEFAULT_SIGNALING_PORT,
     DEFAULT_TALKBACK,
     DOMAIN,
@@ -169,15 +171,20 @@ async def _async_start_streaming(
 
     server: StreamServer | None = domain_data.get("server")
     if server is None:
+        # lan_player opens the socket to the LAN so the player page (and its
+        # ws negotiation) are reachable off-host; the token stays the gate.
         server = StreamServer(
-            entry.options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT)
+            entry.options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT),
+            bind="0.0.0.0"
+            if entry.options.get(CONF_LAN_PLAYER, DEFAULT_LAN_PLAYER)
+            else "127.0.0.1",
         )
         await server.start()
         domain_data["server"] = server
     elif server.port != entry.options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT):
         _LOGGER.warning(
             "Another config entry already started the signaling server on port %d; "
-            "this entry's port setting is ignored",
+            "this entry's port setting is ignored (as is its lan_player bind)",
             server.port,
         )
 

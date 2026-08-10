@@ -21,6 +21,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_ECODE,
     CONF_KEEP_STREAM_RUNNING,
+    CONF_LAN_PLAYER,
     CONF_PARTNER,
     CONF_SID,
     CONF_SIGNALING_PORT,
@@ -30,6 +31,7 @@ from .const import (
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
     DEFAULT_KEEP_STREAM_RUNNING,
+    DEFAULT_LAN_PLAYER,
     DEFAULT_SIGNALING_PORT,
     DEFAULT_STREAM_BACKEND,
     DEFAULT_TALKBACK,
@@ -415,6 +417,7 @@ class PhilipsAventOptionsFlowHandler(config_entries.OptionsFlow):
         current_backend = options.get(CONF_STREAM_BACKEND, DEFAULT_STREAM_BACKEND)
         current_signaling_port = options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT)
         current_keep_running = options.get(CONF_KEEP_STREAM_RUNNING, DEFAULT_KEEP_STREAM_RUNNING)
+        current_lan_player = options.get(CONF_LAN_PLAYER, DEFAULT_LAN_PLAYER)
 
         return self.async_show_form(
             step_id="init",
@@ -434,6 +437,7 @@ class PhilipsAventOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_KEEP_STREAM_RUNNING, default=current_keep_running
                     ): bool,
+                    vol.Optional(CONF_LAN_PLAYER, default=current_lan_player): bool,
                 }
             ),
         )
