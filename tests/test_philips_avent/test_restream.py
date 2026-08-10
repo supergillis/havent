@@ -17,8 +17,13 @@ from restream import MANAGED_RTSP, Restreamer, parse_rtsp_endpoint
 
 WS = "webrtc:ws://127.0.0.1:38555/avent/cam1?t=tok"
 SRC = "philips_avent_cam1_src"
-WANT = (WS, f"ffmpeg:{SRC}#audio=aac")
-RTSP = f"rtsp://127.0.0.1:18554/{SRC}?video&audio=aac"
+AAC = "philips_avent_cam1_src_aac"
+FF = f"ffmpeg:{SRC}#video=copy#audio=aac"
+WANT_SRC = (WS,)
+WANT_AAC = (FF,)
+#: One registration pass registers both streams, producer first.
+BOTH = [("streams.add", SRC, WANT_SRC), ("streams.add", AAC, WANT_AAC)]
+RTSP = f"rtsp://127.0.0.1:18554/{AAC}"
 
 
 def run(coro):
@@ -193,7 +198,7 @@ def test_rtsp_url_when_probe_and_registration_succeed(monkeypatch):
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
-    assert adds(state) == [("streams.add", SRC, WANT)]
+    assert adds(state) == BOTH
 
 
 def test_ws_fallback_when_no_go2rtc(monkeypatch, caplog):
@@ -228,7 +233,7 @@ def test_transient_probe_failure_still_returns_rtsp_url(monkeypatch):
     state.fail_probe_with = TimeoutError()
     host, port = MANAGED_RTSP
     url = run(make_restreamer(hass).stream_url("cam1"))
-    assert url == f"rtsp://{host}:{port}/{SRC}?video&audio=aac"
+    assert url == f"rtsp://{host}:{port}/{AAC}"
 
 
 def test_transient_probe_failure_on_remote_host_returns_ws(monkeypatch):
@@ -242,7 +247,8 @@ def test_transient_probe_failure_on_remote_host_returns_ws(monkeypatch):
 def test_no_put_when_already_registered_with_matching_sources(monkeypatch):
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
-    state.streams[SRC] = FakeStream(list(WANT))
+    state.streams[SRC] = FakeStream(list(WANT_SRC))
+    state.streams[AAC] = FakeStream(list(WANT_AAC))
     restreamer = make_restreamer(hass)
     run(restreamer.stream_url("cam1"))
     run(restreamer.stream_url("cam1"))
@@ -251,23 +257,23 @@ def test_no_put_when_already_registered_with_matching_sources(monkeypatch):
 
 def test_reput_when_sources_differ(monkeypatch):
     """Token rotation, seen while the stream is IDLE: every reported url is
-    in configured form, none is our ws URL — genuinely stale, re-PUT."""
+    in configured form, none is our ws URL — genuinely stale, re-PUT. The
+    untouched `_src_aac` is left alone."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     stale = WS.replace("t=tok", "t=old")
-    state.streams[SRC] = FakeStream([stale, WANT[1]])
+    state.streams[SRC] = FakeStream([stale])
+    state.streams[AAC] = FakeStream(list(WANT_AAC))
     run(make_restreamer(hass).stream_url("cam1"))
-    assert adds(state) == [("streams.add", SRC, WANT)]
+    assert adds(state) == [("streams.add", SRC, WANT_SRC)]
 
 
-#: How go2rtc reports the producers of a RUNNING stream: an active producer
-#: delegates serialization to its connection, so the ffmpeg template comes
+#: How go2rtc reports the producers of RUNNING streams: an active producer
+#: delegates serialization to its connection, so the ffmpeg source comes
 #: back as the expanded exec command line and the ws source as whatever its
 #: connection renders — neither equals the configured source string.
-ACTIVE = [
-    f"exec:ffmpeg -hide_banner -re -i rtsp://127.0.0.1:18554/{SRC}?video&audio -c:a aac ...",
-    "ws://127.0.0.1:38555/avent/cam1",
-]
+ACTIVE_SRC = ["ws://127.0.0.1:38555/avent/cam1"]
+ACTIVE_AAC = [f"exec:ffmpeg -hide_banner -re -i rtsp://127.0.0.1:18554/{SRC} -c:v copy -c:a aac ..."]
 
 
 def test_no_reput_while_producers_are_active(monkeypatch):
@@ -278,7 +284,8 @@ def test_no_reput_while_producers_are_active(monkeypatch):
     mean running, not wrong: skip."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
-    state.streams[SRC] = FakeStream(ACTIVE)
+    state.streams[SRC] = FakeStream(ACTIVE_SRC)
+    state.streams[AAC] = FakeStream(ACTIVE_AAC)
     restreamer = make_restreamer(hass)
     run(restreamer.stream_url("cam1"))
     run(restreamer.stream_url("cam1"))
@@ -292,21 +299,22 @@ def test_no_reput_on_token_change_while_active(monkeypatch):
     session storm. Skip wins."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
-    state.streams[SRC] = FakeStream(ACTIVE)
+    state.streams[SRC] = FakeStream(ACTIVE_SRC)
+    state.streams[AAC] = FakeStream(ACTIVE_AAC)
     restreamer = Restreamer(hass, partial(builtin_stream_url, 38555, "rotated"))
     run(restreamer.stream_url("cam1"))
     assert adds(state) == []
 
 
-def test_no_reput_when_only_the_ffmpeg_source_differs(monkeypatch):
-    """The ws URL is the identity: if it is present, the stream is ours and
-    registered. A drifted second source waits for the next entry reload
-    rather than risking a destructive PUT."""
+def test_aac_stream_repairs_independently(monkeypatch):
+    """A stale idle `_src_aac` re-PUTs alone; the producer — and the Tuya
+    session behind it — is never touched for a recording-stream repair."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
-    state.streams[SRC] = FakeStream([WS, "ffmpeg:somethingelse#audio=opus"])
+    state.streams[SRC] = FakeStream(list(WANT_SRC))
+    state.streams[AAC] = FakeStream(["ffmpeg:oldshape#audio=opus"])
     run(make_restreamer(hass).stream_url("cam1"))
-    assert adds(state) == []
+    assert adds(state) == [("streams.add", AAC, WANT_AAC)]
 
 
 def test_reregisters_after_go2rtc_restart(monkeypatch):
@@ -320,7 +328,7 @@ def test_reregisters_after_go2rtc_restart(monkeypatch):
     run(restreamer.stream_url("cam1"))
     state.streams.clear()  # watchdog respawn: registrations are gone
     run(restreamer.stream_url("cam1"))
-    assert adds(state) == [("streams.add", SRC, WANT)] * 2
+    assert adds(state) == BOTH + BOTH
 
 
 def test_concurrent_calls_register_once(monkeypatch):
@@ -332,7 +340,7 @@ def test_concurrent_calls_register_once(monkeypatch):
         await asyncio.gather(*(restreamer.stream_url("cam1") for _ in range(5)))
 
     run(burst())
-    assert adds(state) == [("streams.add", SRC, WANT)]
+    assert adds(state) == BOTH
 
 
 def test_registration_failure_still_returns_rtsp_url(monkeypatch, caplog):
@@ -360,7 +368,7 @@ def test_whep_answer_negotiates_the_producer(monkeypatch):
     answer = run(make_restreamer(hass).whep_answer("cam1", "v=0 offer"))
     assert answer == "v=0 fake-answer"
     assert ("webrtc.whep", SRC, "v=0 offer") in state.calls
-    assert adds(state) == [("streams.add", SRC, WANT)]  # registered before the offer
+    assert adds(state) == BOTH  # registered before the offer
 
 
 def test_whep_answer_none_when_no_go2rtc(monkeypatch):
@@ -402,7 +410,7 @@ def test_probe_http_5xx_is_transient(monkeypatch):
     state.probe_status = 503
     restreamer = make_restreamer(hass)
     host, port = MANAGED_RTSP
-    assert run(restreamer.stream_url("cam1")) == f"rtsp://{host}:{port}/{SRC}?video&audio=aac"
+    assert run(restreamer.stream_url("cam1")) == f"rtsp://{host}:{port}/{AAC}"
     run(restreamer.stream_url("cam1"))
     assert state.probe_calls == 2  # nothing cached, re-probed
 
@@ -448,7 +456,7 @@ def test_snapshot_grabs_a_frame_from_the_producer(monkeypatch):
     frame = run(make_restreamer(hass).snapshot("cam1"))
     assert frame == b"\xff\xd8fake-jpeg"
     assert ("frame.jpeg", SRC) in state.calls
-    assert adds(state) == [("streams.add", SRC, WANT)]  # registered before the grab
+    assert adds(state) == BOTH  # registered before the grab
 
 
 def test_snapshot_failure_returns_none(monkeypatch):

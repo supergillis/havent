@@ -2,6 +2,7 @@ from const import (
     DEFAULT_BRIDGE_HOST,
     build_rtsp_url,
     builtin_stream_url,
+    go2rtc_aac_name,
     go2rtc_producer_name,
     go2rtc_stream_name,
     sanitize_rtsp_path,
@@ -91,6 +92,21 @@ class TestGo2rtcProducerName:
         a self-consuming loop go2rtc does not guard against."""
         for cam_id in ("abc123", "weird id/☂", "", "_camera", "x_src"):
             assert go2rtc_producer_name(cam_id) != go2rtc_stream_name(cam_id)
+
+    def test_aac_name_shape(self):
+        assert go2rtc_aac_name("abc123") == "philips_avent_abc123_src_aac"
+
+    def test_all_three_stream_names_stay_distinct(self):
+        """`_camera` (HA's provider), `_src` (the Tuya session) and
+        `_src_aac` (the recording transcode) each carry a different producer;
+        any collision would register one over another."""
+        for cam_id in ("abc123", "weird id/☂", "", "_camera", "x_src", "y_src_aac"):
+            names = {
+                go2rtc_stream_name(cam_id),
+                go2rtc_producer_name(cam_id),
+                go2rtc_aac_name(cam_id),
+            }
+            assert len(names) == 3
 
 
 def test_builtin_stream_url_is_pure():

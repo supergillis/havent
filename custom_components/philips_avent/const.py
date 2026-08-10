@@ -216,6 +216,22 @@ def go2rtc_producer_name(cam_id: str) -> str:
     return name
 
 
+def go2rtc_aac_name(cam_id: str) -> str:
+    """The go2rtc stream HA's stream component records from.
+
+    Single source: ffmpeg pulling `_src`'s RTSP, video copied and audio
+    transcoded to AAC (restream.py). A separate stream ON PURPOSE, not a
+    second source on `_src`: the ws endpoint serves exactly one consumer,
+    and a second source there gave go2rtc something to start, EOF and
+    redial against the very session that was already running — the
+    2026-08-10 Tuya-session storm. All three names MUST stay distinct;
+    the asserts guard refactors that touch any of them.
+    """
+    name = quote(f"{DOMAIN}_{cam_id}_src_aac", safe=_GO2RTC_SAFE_CHARS)
+    assert name not in (go2rtc_stream_name(cam_id), go2rtc_producer_name(cam_id))
+    return name
+
+
 def builtin_stream_url(port: int, token: str, cam_id: str) -> str:
     """The signaling endpoint go2rtc dials to open this camera's session.
 

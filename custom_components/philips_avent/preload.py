@@ -48,9 +48,9 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 try:
-    from .const import go2rtc_producer_name, go2rtc_stream_name
+    from .const import go2rtc_aac_name, go2rtc_producer_name, go2rtc_stream_name
 except ImportError:  # imported outside the package, e.g. by the tests
-    from const import go2rtc_producer_name, go2rtc_stream_name
+    from const import go2rtc_aac_name, go2rtc_producer_name, go2rtc_stream_name
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -195,17 +195,22 @@ class StreamPreloader:
 
         Also runs when the backend switched back to the add-on — a stale
         preload would otherwise keep go2rtc dialling a signaling server that
-        is no longer there, for nobody. Sweeps the old `_camera` name too:
-        an upgrade may have left a preload armed by a version that targeted
-        HA's provider stream. Silent when go2rtc is absent: with no go2rtc
-        there is nothing that could still be preloading.
+        is no longer there, for nobody. Sweeps the `_src_aac` recording
+        stream and the old `_camera` name too: an upgrade or a stray hand
+        may have left a preload armed under a name this version no longer
+        arms. Silent when go2rtc is absent: with no go2rtc there is
+        nothing that could still be preloading.
         """
         if (client := self._client()) is None:
             return
         try:
             preloaded = await client.preload.list()
             for camera_id in camera_ids:
-                for name in (go2rtc_producer_name(camera_id), go2rtc_stream_name(camera_id)):
+                for name in (
+                    go2rtc_producer_name(camera_id),
+                    go2rtc_aac_name(camera_id),
+                    go2rtc_stream_name(camera_id),
+                ):
                     if name in preloaded:
                         await client.preload.disable(name)
                         _LOGGER.info(

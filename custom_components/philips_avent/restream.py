@@ -2,15 +2,22 @@
 
 The camera's `stream_source()` used to hand out the signaling `webrtc:ws`
 URL directly; HA's stream component (HLS, `camera.record`, casting) cannot
-open that scheme, so those features were lost. Instead we register the
-producer as go2rtc stream `philips_avent_<id>_src` — sources: the ws URL
-plus an `ffmpeg:#audio=aac` transcode, because HA's stream component drops
-any audio that is not AAC/MP3 and the camera sends PCMU — and hand out
-go2rtc's RTSP URL for it. Everything fans out from that one stream, so one
-Tuya session serves live view, HLS and frame grabs together. Live view and
-stills go through here too: the builtin camera is a native-WebRTC entity
-(overriding the offer handler means HA never attaches its go2rtc provider),
-so WHEP negotiation and frame grabs are ours to make, against the producer.
+open that scheme, so those features were lost. Instead we register TWO
+go2rtc streams: the producer `philips_avent_<id>_src`, whose ONLY source
+is the ws URL, and `philips_avent_<id>_src_aac`, whose only source is an
+`ffmpeg:` pull of the producer's RTSP with video copied and audio
+transcoded to AAC (HA's stream component drops any audio that is not
+AAC/MP3, and the camera sends PCMU). `stream_source()` hands out the RTSP
+URL of `_src_aac`; live view (WHEP) and frame grabs hit `_src` directly.
+Everything still fans out from one Tuya session — RTSP consumers of
+`_src` share the running producer. The split is load-bearing: the ws
+endpoint serves exactly one consumer, and a second source on the same
+stream gave go2rtc something to start, EOF and redial against the very
+session that was already running — the 2026-08-10 session storm. Live
+view and stills go through here too: the builtin camera is a
+native-WebRTC entity (overriding the offer handler means HA never
+attaches its go2rtc provider), so WHEP negotiation and frame grabs are
+ours to make, against the producer.
 
 Where go2rtc's RTSP listens must be probed, not assumed: HA's managed
 instance pins it to 127.0.0.1:18554 in its config template, user-run ones
@@ -39,10 +46,10 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 try:
-    from .const import go2rtc_producer_name
+    from .const import go2rtc_aac_name, go2rtc_producer_name
     from .preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
 except ImportError:  # imported outside the package, e.g. by the tests
-    from const import go2rtc_producer_name
+    from const import go2rtc_aac_name, go2rtc_producer_name
     from preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
 
 try:
@@ -153,16 +160,27 @@ class Restreamer:
             return self._ws_url(cam_id)
         await self._ensure_registered(cam_id)  # best effort; the URL is stable either way
         host, port = endpoint
-        return f"rtsp://{host}:{port}/{go2rtc_producer_name(cam_id)}?video&audio=aac"
+        # No codec-filter query: `_src_aac` carries exactly H.264 + AAC by
+        # construction, so PyAV cannot pick up a codec HA's stream drops.
+        return f"rtsp://{host}:{port}/{go2rtc_aac_name(cam_id)}"
 
     def sources(self, cam_id: str) -> list[str]:
-        """The producer's go2rtc sources: the real session, plus an AAC
-        transcode — HA's stream component drops any audio that is not
-        AAC/MP3, and silent recordings on a baby monitor are worse than
-        none. go2rtc starts the ffmpeg source only when a consumer asks
-        for AAC, so live view never pays for it."""
-        name = go2rtc_producer_name(cam_id)
-        return [self._ws_url(cam_id), f"ffmpeg:{name}#audio=aac"]
+        """The producer's ONLY source: the signaling ws endpoint. One
+        source by design — the endpoint serves exactly one consumer, and a
+        second source here gave go2rtc something to start, EOF and redial
+        against the session already running (the 2026-08-10 storm's fuel).
+        The AAC transcode lives on its own stream: aac_sources()."""
+        return [self._ws_url(cam_id)]
+
+    def aac_sources(self, cam_id: str) -> list[str]:
+        """The recording stream's source: ffmpeg pulling `_src`'s RTSP,
+        video copied, PCMU transcoded to AAC — HA's stream component drops
+        any audio that is not AAC/MP3, and silent recordings on a baby
+        monitor are worse than none. `#video=copy` is load-bearing:
+        `#audio=aac` alone renders `-vn`, an audio-only stream (go2rtc
+        internal/ffmpeg). This dials go2rtc's own RTSP of `_src`, never
+        the camera: RTSP consumers fan out from the running producer."""
+        return [f"ffmpeg:{go2rtc_producer_name(cam_id)}#video=copy#audio=aac"]
 
     def _complain_once(self, kind: str, message: str) -> None:
         """One warning per complaint KIND; repeats drop to debug.
@@ -303,19 +321,22 @@ class Restreamer:
         every open while the stream ran, which WAS that feedback loop)."""
         if (client := go2rtc_rest_client(self._hass)) is None:
             return
-        name = go2rtc_producer_name(cam_id)
-        want = self.sources(cam_id)
         try:
             async with self._lock:
-                stream = (await client.streams.list()).get(name)
-                reported = [p.url for p in stream.producers] if stream else None
-                if needs_registration(want[0], reported):
-                    await client.streams.add(name, want)
-                    # The name, never the sources: the ws URL embeds the token.
-                    _LOGGER.info("Registered go2rtc producer stream %s", name)
+                streams = await client.streams.list()
+                for name, want in (
+                    (go2rtc_producer_name(cam_id), self.sources(cam_id)),
+                    (go2rtc_aac_name(cam_id), self.aac_sources(cam_id)),
+                ):
+                    stream = streams.get(name)
+                    reported = [p.url for p in stream.producers] if stream else None
+                    if needs_registration(want[0], reported):
+                        await client.streams.add(name, want)
+                        # The name, never the sources: the ws URL embeds the token.
+                        _LOGGER.info("Registered go2rtc stream %s", name)
         except Exception as err:  # noqa: BLE001 - registration is best effort; the URL is stable
             self._complain_once(
                 "register",
-                f"Could not register go2rtc stream {name} ({describe_error(err)}); "
-                "will retry on the next frame grab or live view",
+                f"Could not register go2rtc streams for {go2rtc_producer_name(cam_id)} "
+                f"({describe_error(err)}); will retry on the next frame grab or live view",
             )

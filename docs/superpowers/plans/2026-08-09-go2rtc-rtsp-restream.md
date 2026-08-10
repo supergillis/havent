@@ -226,7 +226,17 @@ def parse_rtsp_endpoint(listen: str | None, api_host: str) -> tuple[str, int] | 
 
 ## Task 5: `Restreamer` — probe, register, decide the stream URL
 
-The heart of the change. One class per entry, constructed with `(hass, ws_url: Callable[[str], str])` where `ws_url = partial(builtin_stream_url, port, token)`.
+> **As built (2026-08-10, after the field storm):** the sketches below show the original
+> single-stream design — `_src` carrying the ws URL *plus* an `ffmpeg:#audio=aac` second source,
+> and an exact-url registration compare. Both halves were refuted in the field: the compare
+> mismatches whenever producers are ACTIVE (go2rtc serializes them in resolved form), so every
+> open re-PUT the stream and orphaned live producers into a ~5 s Tuya-session replacement storm;
+> and a second source on the one-consumer ws stream gives go2rtc something to EOF and redial
+> against the running session. The shipped design: `_src` is single-source, the transcode lives
+> on `philips_avent_<id>_src_aac` (`ffmpeg:..._src#video=copy#audio=aac` — `#video=copy` is
+> required, `#audio=aac` alone is audio-only), `stream_source()` returns `_src_aac`'s RTSP URL
+> without a codec query, and the compare is `needs_registration()`'s skip-biased table. See the
+> spec's "The one-consumer stream stays single-source" section.
 
 **Files:**
 - Modify: `custom_components/philips_avent/restream.py`

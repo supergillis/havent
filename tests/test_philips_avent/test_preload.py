@@ -170,13 +170,15 @@ def test_disable_stops_only_armed_preloads(monkeypatch):
     assert disables == [("preload.disable", NAME)]
 
 
-def test_disable_sweeps_both_names(monkeypatch):
-    """An upgrade may leave a _camera preload armed by an older version;
-    disabling must stop it too, or go2rtc streams for nobody."""
+def test_disable_sweeps_every_name(monkeypatch):
+    """An upgrade may leave a preload armed under an older version's name —
+    `_camera` (provider era) or a stray `_src_aac` — and disabling must
+    stop them all, or go2rtc streams for nobody."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     state.preloads["philips_avent_cam1_camera"] = {}
     state.preloads["philips_avent_cam1_src"] = {}
+    state.preloads["philips_avent_cam1_src_aac"] = {}
     run(StreamPreloader(hass).async_disable(["cam1"]))
     assert state.preloads == {}
 

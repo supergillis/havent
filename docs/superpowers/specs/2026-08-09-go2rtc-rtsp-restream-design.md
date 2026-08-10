@@ -51,14 +51,19 @@ thing in the way.
 
 ## Design
 
-One go2rtc stream carries everything for a builtin camera:
+Two go2rtc streams carry everything for a builtin camera — the split is load-bearing (field
+lesson, 2026-08-10, see "The one-consumer stream stays single-source" below):
 
 ```
-philips_avent_<id>_src      ["webrtc:ws://127.0.0.1:38555/avent/<id>?t=<tok>",
-  (ours, via PUT /api/streams)   "ffmpeg:philips_avent_<id>_src#audio=aac"]
-        ▲ RTSP (loopback): HA's stream component — HLS, camera.record, casts
+philips_avent_<id>_src      ["webrtc:ws://127.0.0.1:38555/avent/<id>?t=<tok>"]   ← the ONLY source
+  (ours, via PUT /api/streams)
         ▲ WHEP: live view, negotiated by the camera entity itself
         ▲ frame.jpeg: stills, at most once per FrameCache TTL
+        ▲ RTSP (loopback): consumed by _src_aac's ffmpeg below — fan-out, one Tuya session
+
+philips_avent_<id>_src_aac  ["ffmpeg:philips_avent_<id>_src#video=copy#audio=aac"]
+  (ours, via PUT /api/streams)
+        ▲ RTSP (loopback): HA's stream component — HLS, camera.record, casts
 
 philips_avent_<id>_camera   (HA's provider's name for a camera's stream. For builtin
   cameras NO provider is attached at all — the entity is native WebRTC, see the live-view
@@ -66,21 +71,32 @@ philips_avent_<id>_camera   (HA's provider's name for a camera's stream. For bui
   upgrade, dying with go2rtc's next restart. The name must still never collide with ours.)
 ```
 
-- `stream_source()` returns `rtsp://127.0.0.1:<rtsp_port>/philips_avent_<id>_src?video&audio=aac`.
-  The stream component gets H.264 + AAC and nothing else; go2rtc's RTSP consumer query filters
-  codecs, so PyAV never sees the PCMU track and the "which audio track is first" ambiguity never
-  arises.
+- `stream_source()` returns `rtsp://127.0.0.1:<rtsp_port>/philips_avent_<id>_src_aac` — no
+  codec-filter query needed: `_src_aac` carries exactly H.264 + AAC by construction, so PyAV
+  cannot pick up a codec HA's stream would drop.
 - go2rtc consuming its own loopback RTSP is not novel: HA's provider itself attaches
-  `ffmpeg:<name>#audio=opus` — ffmpeg pulling go2rtc's own RTSP of that same stream — to every
-  camera it registers. `_src`'s AAC source is the same pattern, self-referencing one name.
+  `ffmpeg:<name>#audio=opus` — ffmpeg pulling go2rtc's own RTSP — to every camera it registers.
+  `_src_aac`'s source is the same mechanism, pointed at a *different* name.
+
+### The one-consumer stream stays single-source
+
+The first field build carried the AAC transcode as a *second source on `_src` itself* — HA
+core's own self-referencing pattern. On this backend that pattern is a trap: the ws endpoint
+serves exactly one consumer per camera (`stream_server.py`), and a second source gives go2rtc
+something of its own to start, EOF and redial while the real session runs. Combined with the
+compare defect below it produced the 2026-08-10 storm: a camera session replaced every ~5 s
+until live view died. HA's pattern is safe only because its first source is a fan-out-capable
+RTSP; ours is not. Hence the rule: **`_src` has exactly one source, forever.** The transcode
+lives on `_src_aac`, whose ffmpeg dials `_src`'s RTSP — a fan-out consumer, never the camera.
 
 ### Audio
 
 HA's stream component hard-filters audio to `AUDIO_CODECS = {"aac", "mp3"}` (`stream/const.py`)
-and drops everything else; the camera sends PCMU. Hence the `ffmpeg:<src>#audio=aac` second source
-on `_src` — the exact self-referencing transcode pattern HA core uses — plus the `?audio=aac`
-consumer filter. go2rtc starts sources on demand per requested codec, so the transcode runs only
-while something consumes AAC (a recording, an HLS viewer, a cast), not during plain live view.
+and drops everything else; the camera sends PCMU. Hence `_src_aac`: ffmpeg pulls `_src`'s RTSP,
+copies the video (`#video=copy` is load-bearing — `#audio=aac` alone renders `-vn`, audio only;
+go2rtc `internal/ffmpeg`) and transcodes PCMU→AAC. go2rtc starts sources on demand, so the
+transcode runs only while something consumes `_src_aac` (a recording, an HLS viewer, a cast),
+not during plain live view.
 
 Honesty note for the README: this is 8 kHz telephone-band G.711 re-wrapped as AAC. Recordings
 carry cries and voice fine; the transcode adds no fidelity the camera never sent.
@@ -180,11 +196,13 @@ own setup.
 
 ### Naming
 
-`go2rtc_producer_name(cam_id)` = `philips_avent_<id>_src`, built beside `go2rtc_stream_name()`
-(= `..._camera`, mirroring HA's `get_camera_identifier`) in `const.py`. The two must never be
-equal: if HA's provider ever registered *its* name over ours, `_camera`'s source would become its
-own restream — a self-consuming loop go2rtc does not guard against. The helper asserts the names
-differ and a test pins both suffixes.
+`go2rtc_producer_name(cam_id)` = `philips_avent_<id>_src` and `go2rtc_aac_name(cam_id)` =
+`philips_avent_<id>_src_aac`, built beside `go2rtc_stream_name()` (= `..._camera`, mirroring
+HA's `get_camera_identifier`) in `const.py`. All three must stay pairwise distinct: if HA's
+provider ever registered *its* name over ours, `_camera`'s source would become its own restream —
+a self-consuming loop go2rtc does not guard against — and `_src`/`_src_aac` colliding would
+register the transcode over the producer. The helpers assert distinctness and a test pins all
+three suffixes.
 
 ### `keep_stream_running` retargets — and gets safer
 
@@ -193,10 +211,11 @@ The stream holding the Tuya session is now `_src`, so the preloader arms
 still be stopped; arming both buys nothing. Side benefit: HA's provider enables/disables preload
 for **camera-identifier names** according to the `preload_stream` camera preference (the
 behind-our-back disarm `preload.py`'s docstring documents) — `_src` is not a camera identifier,
-so the option leaves that blast radius entirely. `async_disable` sweeps **both** names, or an
-upgrade strands a `_camera` preload armed by an older version.
+so the option leaves that blast radius entirely. `async_disable` sweeps **all three** names
+(`_src`, `_src_aac`, legacy `_camera`), or an upgrade strands a preload armed under a name this
+version no longer arms.
 
-Lifecycle hygiene: `async_remove_entry` best-effort-disables the preload for both names — on an
+Lifecycle hygiene: `async_remove_entry` best-effort-disables the preload for every name — on an
 **external** go2rtc, an orphaned `_src` preload would otherwise keep dialling a dead loopback
 signaling port unbounded. Removal only, not unload: unload runs on every options reload, and a
 disable-then-re-arm cycle there would churn the producer's Tuya session per config change. The
@@ -205,17 +224,17 @@ nothing dials an unpreloaded, unconsumed stream, and on the managed instance it 
 next HA restart anyway. **Downgrade is an accepted risk, documented not solved:** an older
 version's `async_disable` sweeps only `_camera`, so a `_src` preload armed by this version
 survives a downgrade — the release notes say to turn `keep_stream_running` off before
-downgrading. **Open question:** whether go2rtc's
-preload consumer (default query `video&audio`) starts the ffmpeg AAC source or is satisfied by the
-ws producer's PCMU. If it pins the transcode 24/7, pass `audio_codec_filter` on
-`preload.enable()` (the parameter exists in `go2rtc_client`) restricting it to the native codecs.
+downgrading. The transcode-pinning question the first design carried is dissolved by the stream
+split: `_src` has only the ws source, so its preload consumer has nothing else to start —
+`_src_aac` is never preloaded and its ffmpeg runs only while a recording/HLS consumer exists.
 
 ## Failure modes and guards
 
 - **Redial pressure.** go2rtc's ffmpeg sources redial eagerly during failures (`stream_server.py`,
-  `COOLDOWN` note), and `_src` now carries one of its own. The existing 25 s circuit breaker and
-  6 s `ANSWER_TIMEOUT` are the guard and must not be weakened; the soak test must include a
-  failing-camera window with a recording active.
+  `COOLDOWN` note). `_src` carries none of its own any more — `_src_aac`'s ffmpeg dials `_src`'s
+  RTSP, so its retries land on go2rtc, not the camera. The existing 25 s circuit breaker and
+  6 s `ANSWER_TIMEOUT` remain the guard for the ws endpoint and must not be weakened; the soak
+  test must include a failing-camera window with a recording active.
 - **Availability semantics change.** Stream-component failures (cooldown, full pool) can now
   surface as camera-entity unavailability flapping — a path the `webrtc:` design never exercised.
   Watch it in the soak; no pre-emptive code.
