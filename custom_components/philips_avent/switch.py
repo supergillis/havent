@@ -11,9 +11,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     DOMAIN,
+    DPS_AWAKE_ALERT_SWITCH,
+    DPS_CRY_ALERT_SWITCH,
     DPS_MOTION_SWITCH,
     DPS_NIGHT_LIGHT,
+    DPS_NO_SIGNAL_ALERT_SWITCH,
     DPS_PRIVACY_MODE,
+    DPS_SENSEIQ_SWITCH,
     DPS_SOUND_SWITCH,
 )
 from .coordinator import PhilipsAventCoordinator
@@ -30,6 +34,19 @@ async def async_setup_entry(
             AventSwitch(coordinator, cam_id, DPS_NIGHT_LIGHT, "Night Light", "mdi:lightbulb-night"),
             AventSwitch(coordinator, cam_id, DPS_MOTION_SWITCH, "Motion Alert", "mdi:motion-sensor"),
             AventSwitch(coordinator, cam_id, DPS_SOUND_SWITCH, "Sound Alert", "mdi:ear-hearing"),
+            # SenseIQ master enable, DPS 1 `sleepiq_switch`: an ordinary rw
+            # bool like the alert switches above (observed True on live
+            # hardware), mirroring the on/off the Philips app exposes.
+            AventSwitch(coordinator, cam_id, DPS_SENSEIQ_SWITCH, "SenseIQ", "mdi:sleep"),
+            # The three SenseIQ alert toggles (DPS 11/12/13, `awake_switch` /
+            # `cry_det_switch` / `no_senseiq_switch`): plain rw bools per the
+            # schema, same shape as the motion and sound alert switches. On
+            # the live monitor only the no-signal alert was on. Enabling the
+            # awake alert is also how the still-unobserved DPS 4 awake stage
+            # code will eventually be caught.
+            AventSwitch(coordinator, cam_id, DPS_AWAKE_ALERT_SWITCH, "Awake Alert", "mdi:baby-face-outline"),
+            AventSwitch(coordinator, cam_id, DPS_CRY_ALERT_SWITCH, "Cry Alert", "mdi:emoticon-cry-outline"),
+            AventSwitch(coordinator, cam_id, DPS_NO_SIGNAL_ALERT_SWITCH, "No-Signal Alert", "mdi:signal-off"),
             AventEnumSwitch(coordinator, cam_id, DPS_PRIVACY_MODE, "Privacy Mode", "mdi:eye-off"),
         ])
     async_add_entities(entities)

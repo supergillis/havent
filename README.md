@@ -8,7 +8,7 @@
 [![CI](https://github.com/thekoma/aventproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/thekoma/aventproxy/actions/workflows/ci.yml)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, providing local streaming, temperature monitoring, night light control, lullaby playback, and motion/sound alerts.
+Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, providing local streaming, temperature monitoring, night light control, lullaby playback, motion/sound alerts, and SenseIQ sleep tracking.
 
 ## Features
 
@@ -23,6 +23,15 @@ Home Assistant integration for Philips Avent SCD973/SCD923 baby monitors, provid
 | 🏃 Motion Detected | Binary Sensor | Fires when motion is detected (auto-clears after 30s) |
 | 🔊 Sound Detected | Binary Sensor | Fires when sound is detected (auto-clears after 30s) |
 | 🔒 Privacy Mode | Switch | Camera on/off |
+| 😴 SenseIQ | Switch | Sleep tracking on/off |
+| 😴 Sleep State | Sensor | Deep or light sleep (deep confirmed against the app; light inferred); unrecognised codes read unknown |
+| 🫁 Breathing Rate | Sensor | Breaths per minute, confirmed against the app's own reading |
+| 🛏️ Sleep Session | Sensors | Start time and running duration of the current sleep session |
+| 👁️ Sensing Status | Sensor | What SenseIQ currently senses; `b` → `breathing` (documented), other codes read unknown until observed |
+| 👶 Awake Alert | Switch | Baby awake alert on/off |
+| 😢 Cry Alert | Switch | Cry alert on/off |
+| 📶 No-Signal Alert | Switch | SenseIQ no-signal alert on/off |
+| 📶 SenseIQ No-Signal Flag | Binary Sensor | Diagnostic; the raw DPS 15 flag, polarity unproven (read `true` on a healthy monitor) — not a problem sensor |
 
 Multiple monitors on one Tuya account are supported: the bridge serves each camera from the same port on a distinct RTSP path derived from the camera's display name.
 
@@ -217,10 +226,17 @@ The integration uses the same Tuya Mobile SDK API as the official Philips Avent 
 | 158 | `floodlight_lightness` | Brightness | 1–100 |
 | 201 | `play_control` | Lullaby | play/pause/stop/next/prev |
 | 207 | `sensor_temperature` | Temperature | °C × 100 |
-| 209 | `play_volume` | Volume | 1–100 |
+| 209 | `play_volume` | Volume | 44–100 |
 | 134 | `motion_switch` | Motion alert | on/off |
 | 139 | `decibel_switch` | Sound alert | on/off |
 | 237 | `privacy_switch` | Privacy mode | 0/1 |
+| 1 | `sleepiq_switch` | SenseIQ sleep tracking | on/off |
+| 3 | `sleepiq_status` | Live SenseIQ status | JSON: `br` = breathing rate (confirmed), `r` = sensing status, `b`=breathing (documented) |
+| 4 | `sleep_session_data` | Current sleep session | start + duration + sleep state (`d`=deep confirmed, `l`=light inferred) + timeline |
+| 11 | `awake_switch` | Awake alert | on/off |
+| 12 | `cry_det_switch` | Cry alert | on/off |
+| 13 | `no_senseiq_switch` | No-signal alert | on/off |
+| 15 | `no_senseiq_signal` | No SenseIQ signal | true/false (polarity unproven) |
 
 Full reference: [examples/DPS_REFERENCE.md](examples/DPS_REFERENCE.md)
 

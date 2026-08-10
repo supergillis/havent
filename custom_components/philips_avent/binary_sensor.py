@@ -9,6 +9,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
@@ -21,6 +22,7 @@ from .const import (
     DPS_DECIBEL_EVENT,
     DPS_LULLABY_STATE,
     DPS_MOTION_SWITCH,
+    DPS_NO_SENSEIQ_SIGNAL,
 )
 from .coordinator import PhilipsAventCoordinator
 from .entity import build_device_info
@@ -41,8 +43,42 @@ async def async_setup_entry(
             AventLullabyPlaying(coordinator, cam_id),
             AventMotionDetected(coordinator, cam_id),
             AventSoundDetected(coordinator, cam_id),
+            AventSenseIQSignalFlag(coordinator, cam_id),
         ])
     async_add_entities(entities)
+
+
+class AventSenseIQSignalFlag(CoordinatorEntity, BinarySensorEntity):
+    """The raw DPS 15 `no_senseiq_signal` flag, relayed without interpretation.
+
+    The schema names it "No SenseIQ signal" and it pairs with the DPS 13
+    no-signal alert switch, but its polarity is unproven: it read `True` on a
+    healthy monitor that was reporting a live breathing rate at the same
+    moment, and no public source says which way round it means. So this is
+    deliberately NOT a `problem` sensor — shipping it as one cried wolf
+    permanently — and it carries no device class at all. It stays as a
+    diagnostic entity because it is the raw evidence: the day it is seen to
+    flip against a known room state, the polarity is pinned and this can
+    become a real signal. Until then, do not automate on it.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "SenseIQ No-Signal Flag"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:sleep-off"
+
+    def __init__(self, coordinator: PhilipsAventCoordinator, cam_id: str):
+        super().__init__(coordinator)
+        self._cam_id = cam_id
+        self._attr_unique_id = f"{cam_id}_no_senseiq_signal"
+        self._attr_device_info = build_device_info(coordinator, cam_id)
+
+    @property
+    def is_on(self) -> bool | None:
+        dps = self.coordinator.data
+        if dps and DPS_NO_SENSEIQ_SIGNAL in dps:
+            return bool(dps[DPS_NO_SENSEIQ_SIGNAL])
+        return None
 
 
 class AventLullabyPlaying(CoordinatorEntity, BinarySensorEntity):
