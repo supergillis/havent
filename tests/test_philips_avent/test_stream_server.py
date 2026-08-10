@@ -114,12 +114,6 @@ def watch_answers(source: CameraSource) -> list[bool]:
     return answered
 
 
-def age_past_refusal(server: StreamServer, camera_id: str = "cam1") -> None:
-    """Slide the live stream's answer back past REFUSE_WINDOW, so the next
-    dial exercises the warn-and-replace path instead of being refused."""
-    server._streams[camera_id].answered_at -= module.REFUSE_WINDOW
-
-
 class TestNegotiation:
     def test_offer_and_answer_are_rewritten_and_candidates_relayed(self):
         hub = FakeHub()
@@ -147,7 +141,6 @@ class TestSessionLifetime:
 
         async def go():
             await server._negotiate(source, OFFER, sink)
-            age_past_refusal(server)
             await server._negotiate(source, OFFER, sink)
 
         run(go())
@@ -309,43 +302,6 @@ class TestCircuitBreaker:
         assert hub.opened == 1
 
 
-class TestRefuseWindow:
-    """The last line against a self-sustaining replacement loop: a dial
-    landing within seconds of an answer is refused before any cloud call.
-    The 2026-08-10 storm replaced the camera session every ~5s — orphaned
-    go2rtc producers redialling right after each answer, forever. A real
-    quick reopen loses one attempt and wins on go2rtc's 1-5s retry."""
-
-    def test_a_dial_right_after_an_answer_is_refused(self):
-        hub = FakeHub()
-        server, source = build(hub)
-
-        async def go():
-            stream, _ = await server._negotiate(source, OFFER, sink)
-            with pytest.raises(SignalingError, match="refusing"):
-                await server._negotiate(source, OFFER, sink)
-            return stream
-
-        stream = run(go())
-        # The refusal made no cloud call and never touched the live session.
-        assert hub.opened == 1
-        assert not stream.released
-        assert hub.disconnected == []
-
-    def test_replacement_proceeds_outside_the_window(self):
-        hub = FakeHub()
-        server, source = build(hub)
-
-        async def go():
-            await server._negotiate(source, OFFER, sink)
-            age_past_refusal(server)
-            await server._negotiate(source, OFFER, sink)
-
-        run(go())
-        assert hub.opened == 2
-        assert hub.disconnected == ["session-1"]
-
-
 class TestOnAnswered:
     """The hook the keep_stream_running option hangs off (see preload.py).
 
@@ -364,7 +320,6 @@ class TestOnAnswered:
 
         async def go():
             await server._negotiate(source, OFFER, sink)
-            age_past_refusal(server)
             await server._negotiate(source, OFFER, sink)
 
         run(go())

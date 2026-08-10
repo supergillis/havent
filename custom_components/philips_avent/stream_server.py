@@ -67,17 +67,6 @@ ANSWER_TIMEOUT = 6.0
 #: which go2rtc does eagerly, twice per stream via its ffmpeg second source —
 #: only digs the hole deeper. No cloud call, no offer, until this expires.
 COOLDOWN = 25.0
-#: A dial this soon after an answer is refused outright, before any cloud
-#: call. The 2026-08-10 storm self-sustained exactly here: re-PUT-orphaned
-#: go2rtc producers redialled seconds after every answer, each dial
-#: replacing the session that had just been established, ~5s per cycle,
-#: indefinitely. There is no media-liveness signal to consult (go2rtc
-#: closes the ws at ICE), so the gate is answered-age alone and the window
-#: is kept small. The trade: a *legitimate* quick reopen loses one attempt
-#: and wins on go2rtc's own 1-5s retry backoff, entering the
-#: warn-and-replace path below — while a loop that redials faster than the
-#: window breaks instead of sustaining itself.
-REFUSE_WINDOW = 3.0
 #: A redial this soon after a successful answer means a second consumer is
 #: attached (go2rtc only redials when it has no producer). One camera, one
 #: consumer: two go2rtc instances will replace — and disconnect — each other.
@@ -212,16 +201,6 @@ class StreamServer:
             )
 
         if (previous := self._streams.get(source.camera_id)) is not None:
-            if previous.answered_at is not None and loop.time() - previous.answered_at < REFUSE_WINDOW:
-                # Raised before open_session: no cloud call, no offer, and
-                # crucially the live session is NOT released — see the
-                # REFUSE_WINDOW comment for the loop this breaks.
-                raise SignalingError(
-                    f"{source.name} was answered only "
-                    f"{loop.time() - previous.answered_at:.1f}s ago; refusing this "
-                    "dial so a redial loop cannot replace the live session (a real "
-                    "reopen retries and wins in a few seconds)"
-                )
             if previous.answered_at is not None and loop.time() - previous.answered_at < RECENT_ANSWER:
                 _LOGGER.warning(
                     "A second consumer appears to be dialling %s: its stream was "
