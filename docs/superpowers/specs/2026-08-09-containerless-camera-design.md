@@ -62,8 +62,9 @@ HA go2rtc provider ── streams.add() ──▶ go2rtc ──ws──▶ aioht
 - The tablet URL: go2rtc terminates the media, so go2rtc serves it — `go2rtc: debug_ui: true` and
   `http://<ha-ip>:11984/stream.html?src=philips_avent_<unique_id>&mode=webrtc` (WebRTC only; HA
   enables no mp4/hls modules). A browser player page negotiating directly with the camera was
-  built, verified to RTP flowing, and removed as an unneeded second HTTP surface; it is in git
-  history.
+  built, verified to RTP flowing, and removed as an unneeded second HTTP surface; its successor
+  is `player.py` — the opt-in `lan_player` option serves `/player/<cam_id>` from the signaling
+  server and the media bypasses go2rtc entirely.
 
 ## Verified on hardware
 

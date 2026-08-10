@@ -93,8 +93,25 @@ config file and logs a reminder to stop the add-on.
 
 ### A URL to watch outside Home Assistant
 
-On the built-in backend the video is terminated by go2rtc, so go2rtc is what serves a watchable
-URL. Home Assistant keeps its bundled instance private by default; turn on its debug UI to reach it:
+The built-in backend can serve its own player page: enable the **Serve the LAN player page**
+option (`lan_player`) in the integration's options. It opens the signaling server to your LAN
+and serves
+
+```
+http://<home-assistant>:38555/player/<camera-id>?t=<stream-token>
+```
+
+(the port is the `signaling_port` option; the token is `stream_token` in the config entry — it
+is in the diagnostics-redacted set, so copy it from `.storage/core.config_entries`). The page
+negotiates WebRTC **directly with the camera**: media flows camera → browser peer-to-peer over
+the LAN, with neither Home Assistant nor go2rtc in the path, so it keeps working when they
+misbehave — which also makes it a clean A/B probe for streaming problems. Two trades to know:
+anyone on your LAN holding the link can watch (the token is the only lock — the option is off
+by default for exactly this reason), and the camera serves **one consumer at a time**, so the
+player and a Home Assistant live view replace each other's sessions.
+
+Alternatively, go2rtc — which terminates the media for normal HA viewing — can serve a URL.
+Home Assistant keeps its bundled instance private by default; turn on its debug UI to reach it:
 
 ```yaml
 # configuration.yaml
