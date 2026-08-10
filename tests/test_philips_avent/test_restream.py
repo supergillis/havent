@@ -37,6 +37,12 @@ def make_restreamer(hass):
 class FakeHass:
     def __init__(self):
         self.data = {}
+        self.tasks = []
+
+    def async_create_background_task(self, coro, name):
+        task = asyncio.get_running_loop().create_task(coro, name=name)
+        self.tasks.append(task)
+        return task
 
 
 class FakeState:
@@ -44,12 +50,18 @@ class FakeState:
 
     def __init__(self):
         self.streams: dict[str, FakeStream] = {}
+        self.preloads: dict[str, dict] = {}
         self.calls: list[tuple] = []
         self.rtsp_listen: str | None = "127.0.0.1:18554"
         self.probe_status = 200
         self.probe_calls = 0
+        #: Enabling a preload starts the stream's producer, so subsequent
+        #: streams.list() reports it in resolved/active form — the go2rtc
+        #: behavior the warm-up polls for. Off for tests of the timeout.
+        self.activate_on_preload = True
         self.fail_probe_with: BaseException | None = None
         self.fail_add_with: BaseException | None = None
+        self.fail_preload_with: BaseException | None = None
         self.fail_whep_with: BaseException | None = None
         self.fail_snapshot_with: BaseException | None = None
 
@@ -77,6 +89,27 @@ class FakeStreamsAPI:
         if self._state.fail_add_with is not None:
             raise self._state.fail_add_with
         self._state.streams[name] = FakeStream(list(sources))
+
+
+class FakePreloadAPI:
+    def __init__(self, state):
+        self._state = state
+
+    async def list(self):
+        self._state.calls.append(("preload.list",))
+        return dict(self._state.preloads)
+
+    async def enable(self, name):
+        self._state.calls.append(("preload.enable", name))
+        if self._state.fail_preload_with is not None:
+            raise self._state.fail_preload_with
+        self._state.preloads[name] = {}
+        if self._state.activate_on_preload and name in self._state.streams:
+            self._state.streams[name] = FakeStream([f"exec:running {name}"])
+
+    async def disable(self, name):
+        self._state.calls.append(("preload.disable", name))
+        self._state.preloads.pop(name, None)
 
 
 class FakeSdpModel:
@@ -141,6 +174,7 @@ def install_go2rtc(monkeypatch, hass, state, url="http://localhost:11984/"):
             assert session is not None and url
             self.streams = FakeStreamsAPI(state)
             self.webrtc = FakeWebRTCAPI(state)
+            self.preload = FakePreloadAPI(state)
 
         async def get_jpeg_snapshot(self, name, width=None, height=None):
             # Mirrors the real top-level method (GET /api/frame.jpeg).
@@ -151,11 +185,20 @@ def install_go2rtc(monkeypatch, hass, state, url="http://localhost:11984/"):
 
     monkeypatch.setattr(preload_mod, "Go2RtcRestClient", FakeClient)
     monkeypatch.setattr(restream_mod, "WebRTCSdpOffer", FakeSdpModel)
+    # Fast warm-up bounds: the fakes activate synchronously (or never), so
+    # the polls only need to be long enough to actually yield the loop.
+    monkeypatch.setattr(restream_mod, "_WARMUP_TIMEOUT", 0.05)
+    monkeypatch.setattr(restream_mod, "_WARMUP_POLL", 0.01)
+    monkeypatch.setattr(restream_mod, "_WARMUP_RELEASE", 0.02)
     hass.data["go2rtc"] = FakeConfig()
 
 
 def adds(state):
     return [c for c in state.calls if c[0] == "streams.add"]
+
+
+def preload_calls(state):
+    return [c for c in state.calls if c[0].startswith("preload.")]
 
 
 # -- the decision table (pure) ---------------------------------------------
@@ -469,6 +512,124 @@ def test_snapshot_failure_returns_none(monkeypatch):
 def test_snapshot_none_when_no_go2rtc(monkeypatch):
     hass = FakeHass()  # hass.data empty
     assert run(make_restreamer(hass).snapshot("cam1")) is None
+
+
+# -- the warm-up: the chain must be up before PyAV dials --------------------
+
+
+def test_cold_open_warms_the_chain(monkeypatch):
+    """A cold stream_url() arms a temporary preload on _src_aac so go2rtc
+    starts ffmpeg -> _src -> camera BEFORE PyAV's 5s open patience begins;
+    a cold open without this failed with "Invalid data found when
+    processing input" (field, 2026-08-10 23:54)."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert ("preload.enable", AAC) in state.calls
+    assert ("preload.enable", SRC) not in state.calls  # only the chain's head
+
+
+def test_warmup_skipped_when_chain_already_active(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[SRC] = FakeStream(ACTIVE_SRC)
+    state.streams[AAC] = FakeStream(ACTIVE_AAC)
+    run(make_restreamer(hass).stream_url("cam1"))
+    assert [c for c in state.calls if c[0] == "preload.enable"] == []
+
+
+def test_warmup_timeout_still_returns_url(monkeypatch, caplog):
+    """The chain not coming up in time must not fail stream_source():
+    the URL is stable and the stream worker retries, warmer each time."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.activate_on_preload = False
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_warmup_failure_still_returns_url(monkeypatch, caplog):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_preload_with = TimeoutError()
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert "warm up" in caplog.text
+
+
+def test_warmup_release_disables_after_the_window(monkeypatch):
+    """The temporary preload winds down once the real consumer holds the
+    chain — a mere stream_url() call must never leave a permanent camera
+    session behind; that is keep_stream_running's opt-in, not ours."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+
+    async def scenario():
+        await make_restreamer(hass).stream_url("cam1")
+        assert AAC in state.preloads  # armed
+        await asyncio.gather(*hass.tasks)
+
+    run(scenario())
+    assert ("preload.disable", AAC) in state.calls
+    assert AAC not in state.preloads
+
+
+def test_warmup_release_skips_a_vanished_preload(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+
+    async def scenario():
+        await make_restreamer(hass).stream_url("cam1")
+        state.preloads.clear()  # go2rtc restarted, or someone disabled it
+        await asyncio.gather(*hass.tasks)
+
+    run(scenario())
+    assert ("preload.disable", AAC) not in state.calls
+
+
+def test_no_preload_put_when_already_preloaded(monkeypatch):
+    """A preload PUT over an existing one drops and redials its consumer
+    (the same destructiveness preload.py documents), and an arming we did
+    not make is not ours to release."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.preloads[AAC] = {}  # someone else holds it (e.g. the user)
+
+    async def scenario():
+        await make_restreamer(hass).stream_url("cam1")
+        await asyncio.gather(*hass.tasks)
+
+    run(scenario())
+    assert ("preload.enable", AAC) not in state.calls
+    assert AAC in state.preloads  # never released by us
+
+
+def test_concurrent_cold_opens_arm_once_and_finish(monkeypatch):
+    """The check-then-enable is serialized (one arming), but no lock is
+    held across the polls — concurrent opens must all complete."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.activate_on_preload = False  # keep both callers polling
+    restreamer = make_restreamer(hass)
+
+    async def burst():
+        return await asyncio.gather(
+            restreamer.stream_url("cam1"), restreamer.stream_url("cam1")
+        )
+
+    assert run(burst()) == [RTSP, RTSP]
+    assert [c for c in state.calls if c[0] == "preload.enable"] == [("preload.enable", AAC)]
+
+
+def test_setup_pass_does_not_warm(monkeypatch):
+    """warm=False registers only: warming at entry setup would open a Tuya
+    session at every HA start for nobody."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    assert run(make_restreamer(hass).stream_url("cam1", warm=False)) == RTSP
+    assert preload_calls(state) == []
+    assert adds(state) == BOTH  # registration still happened
 
 
 def test_probe_success_is_cached_transient_failure_is_not(monkeypatch):

@@ -194,6 +194,32 @@ during an outage starts working as soon as any of those paths re-registers `_src
 `manifest.json` gains `after_dependencies: ["go2rtc"]` so the setup pass stops racing go2rtc's
 own setup.
 
+### Cold start: the chain must be warm before PyAV dials
+
+Field, 2026-08-10 23:54: a cold `camera.record` failed with `Error opening stream (Invalid data
+found when processing input)`, no clip was written, HLS clients spun forever, and every 15 s
+stream-worker retry dialled a fresh camera session. With the chain warm, a direct ffprobe of
+`_src_aac` succeeded and showed exactly the promised H.264 + AAC. The mechanism: PyAV opens RTSP
+with a **hardcoded 5 s socket timeout** (`stream/_convert_stream_options`, `stimeout: 5000000`)
+and there is no supported hook to raise it — `Camera.stream_options` exists but is
+schema-limited to `rtsp_transport`/`use_wallclock_as_timestamps`/`extra_part_wait_time`
+(`STREAM_OPTIONS_SCHEMA`); that is the prong-1 verdict, recorded here so nobody monkeypatches.
+A cold `_src_aac` needs go2rtc to launch ffmpeg, ffmpeg to dial `_src`, the ws source to build a
+Tuya session and a first keyframe — ~5–8 s measured, longer than PyAV's patience.
+
+So `stream_url()` **warms the chain before the URL goes out**: if go2rtc does not already report
+an active producer on `_src_aac`, it arms a *temporary* preload there (an API-side consumer, the
+same lever `keep_stream_running` uses — on a different name), polls until the producer is active
+(bounded at 8 s: `stream_source()` itself runs under HA's 10 s
+`CAMERA_STREAM_SOURCE_TIMEOUT`, and PyAV's 5 s only starts after), and releases that preload 90 s
+later — by then the real consumer holds the chain, and if none ever came the chain winds down
+rather than streaming the camera for nobody. The check-then-enable is serialized so concurrent
+opens arm once; no lock is held across the polls; a preload armed by anyone else is neither
+re-armed (a preload PUT drops and redials its consumer) nor released. `keep_stream_running`'s
+own preload lives on `_src` and is untouched. The setup pass registers with `warm=False` —
+warming at every HA start would open a camera session for nobody. Warm-up failure or timeout
+still returns the stable URL: the stream worker retries, warmer each time.
+
 ### Naming
 
 `go2rtc_producer_name(cam_id)` = `philips_avent_<id>_src` and `go2rtc_aac_name(cam_id)` =

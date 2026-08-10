@@ -377,8 +377,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if restreamer is not None:
             # Cold-start registration: go2rtc knows the producer before the
             # first view or thumbnail. Best effort — failures degrade inside.
+            # warm=False: registration only. Warming here would open a Tuya
+            # session at every HA start for nobody; keep_stream_running is
+            # the opt-in for that.
             for cam_id in camera_ids:
-                await restreamer.stream_url(cam_id)
+                await restreamer.stream_url(cam_id, warm=False)
         if preloader is not None:
             await preloader.async_resume(camera_ids)
         else:

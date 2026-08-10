@@ -26,6 +26,13 @@ the managed instance's allow_paths whitelist) and every request rides
 `hass.data["go2rtc"]`'s own session — the managed API is a unix socket
 with per-boot local_auth, unreachable any other way.
 
+The recording chain must be WARM before PyAV dials it. HA's stream
+component opens with a hardcoded 5 s socket timeout and no hook to raise
+it, while a cold `_src_aac` needs ffmpeg, a Tuya session and a keyframe
+first (~5-8 s measured) — so `stream_url()` arms a temporary preload on
+`_src_aac`, waits for an active producer, and releases the preload 90 s
+later (see _warm_up; the 2026-08-10 23:54 "Invalid data" failures).
+
 The one rule everything here serves: never break live view to gain HLS.
 HA's `Camera.async_create_stream` calls `stream_source()` at most once per
 entity lifetime and freezes the result into its cached Stream. So only a
@@ -77,6 +84,20 @@ _ALL_INTERFACES = ("", "0.0.0.0", "::", "[::]")
 #: transient failure must still yield the stable RTSP URL (see spec).
 MANAGED_RTSP = ("127.0.0.1", 18554)
 
+#: How long stream_url() may wait for the recording chain to come up before
+#: handing out the URL anyway. Must clear HA's hard ceiling on
+#: stream_source() — camera.const.CAMERA_STREAM_SOURCE_TIMEOUT, 10 s — with
+#: room left for the probe and registration; PyAV's own 5 s socket timeout
+#: only starts ticking after this, so the chain gets ~13 s in total against
+#: a measured ~5-8 s cold latency.
+_WARMUP_TIMEOUT = 8.0
+_WARMUP_POLL = 0.5
+#: How long the warm-up preload holds the chain once the URL went out. By
+#: then the real consumer (PyAV) is attached and keeps the chain alive on
+#: its own; if none ever came, the chain winds down instead of streaming
+#: the camera for nobody.
+_WARMUP_RELEASE = 90.0
+
 
 #: Source schemes as we configure them. `GET /api/streams` reports an IDLE
 #: producer as its configured source string, but an ACTIVE producer
@@ -118,6 +139,18 @@ def needs_registration(key_source: str, reported: list[str] | None) -> bool:
     return all(url.startswith(_CONFIGURED_SCHEMES) for url in reported)
 
 
+def _looks_active(stream) -> bool:
+    """Whether go2rtc reports this stream as running.
+
+    Same signal needs_registration reads defensively: an active producer
+    serializes in resolved form, outside the schemes we configure. Absent
+    stream or all-configured-form producers means idle.
+    """
+    if stream is None:
+        return False
+    return any(not p.url.startswith(_CONFIGURED_SCHEMES) for p in stream.producers)
+
+
 def parse_rtsp_endpoint(listen: str | None, api_host: str) -> tuple[str, int] | None:
     """(host, port) HA's stream worker can dial, or None to fall back."""
     if not listen:
@@ -144,21 +177,29 @@ class Restreamer:
         self._endpoint: tuple[str, int] | None = None  # cached on success only
         self._no_rtsp = False  # the permanent this-config-has-no-RTSP verdict
         self._lock = asyncio.Lock()  # serializes the check-then-PUT
+        self._warm_lock = asyncio.Lock()  # serializes the check-then-preload; never held across polls
         self._warned: set[str] = set()  # complaint kinds already warned about
 
-    async def stream_url(self, cam_id: str) -> str:
+    async def stream_url(self, cam_id: str, *, warm: bool = True) -> str:
         """The producer's RTSP URL, or the webrtc: fallback — but the
         fallback ONLY for permanent, config-shaped verdicts (no go2rtc,
         RTSP disabled, remote-loopback). HA's stream component calls
         stream_source() at most once per entity lifetime and freezes the
         result, so a transient failure must still return the stable RTSP
         URL: the stream worker retries its source, and re-registration
-        arrives via WHEP live-view opens, frame grabs and the setup
-        pass."""
+        arrives via WHEP live-view opens, frame grabs and the setup pass.
+
+        `warm=True` (the stream_source() path) also starts the recording
+        chain before the URL goes out — see _warm_up. The setup pass
+        registers with warm=False: arming a camera session at every HA
+        start, for nobody, is exactly what keep_stream_running exists to
+        opt into."""
         endpoint = await self._rtsp_endpoint()  # None only for permanent verdicts
         if endpoint is None:
             return self._ws_url(cam_id)
         await self._ensure_registered(cam_id)  # best effort; the URL is stable either way
+        if warm:
+            await self._warm_up(cam_id)  # best effort; bounded
         host, port = endpoint
         # No codec-filter query: `_src_aac` carries exactly H.264 + AAC by
         # construction, so PyAV cannot pick up a codec HA's stream drops.
@@ -339,4 +380,77 @@ class Restreamer:
                 "register",
                 f"Could not register go2rtc streams for {go2rtc_producer_name(cam_id)} "
                 f"({describe_error(err)}); will retry on the next frame grab or live view",
+            )
+
+    async def _warm_up(self, cam_id: str) -> None:
+        """Start the recording chain before the URL goes out.
+
+        PyAV opens the RTSP URL with a hardcoded 5 s socket timeout
+        (stream's _convert_stream_options) and no supported way for a
+        camera to raise it — Camera.stream_options is schema-limited to
+        transport, wallclock and part-wait. A cold `_src_aac` needs go2rtc
+        to launch ffmpeg, ffmpeg to dial `_src`, the ws source to build a
+        Tuya session and a first keyframe to arrive — longer than PyAV's
+        patience, so a cold `camera.record`/HLS open failed with "Invalid
+        data found when processing input" and every 15 s stream-worker
+        retry dialled a fresh camera session (field, 2026-08-10 23:54).
+
+        The lever is a TEMPORARY preload on `_src_aac`: an API-side
+        consumer — the same lever keep_stream_running uses, on a different
+        name — that makes go2rtc start the chain now. We arm it only if
+        nobody else has (a preload PUT over an existing one drops and
+        redials its consumer), poll until the stream reports an active
+        producer, and release our arming _WARMUP_RELEASE later, when the
+        real consumer holds the chain — or nobody came and it winds down.
+        keep_stream_running's own preload lives on `_src` and is never
+        released here. The locks: the check-then-enable is serialized so
+        two concurrent opens arm once, but no lock is held across the
+        polls. Never raises; a failed warm-up still hands out the URL —
+        the stream worker retries, warmer each time.
+        """
+        if (client := go2rtc_rest_client(self._hass)) is None:
+            return
+        name = go2rtc_aac_name(cam_id)
+        armed_here = False
+        try:
+            async with self._warm_lock:
+                streams = await client.streams.list()
+                if _looks_active(streams.get(name)):
+                    return  # already warm: a consumer or an earlier warm-up
+                if name not in await client.preload.list():
+                    await client.preload.enable(name)
+                    armed_here = True
+            if armed_here:
+                self._hass.async_create_background_task(
+                    self._release_warmup(name), f"philips_avent warmup release {name}"
+                )
+            deadline = asyncio.get_running_loop().time() + _WARMUP_TIMEOUT
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(_WARMUP_POLL)
+                streams = await client.streams.list()
+                if _looks_active(streams.get(name)):
+                    return
+            _LOGGER.debug(
+                "%s did not come up within %.0fs; handing out the URL anyway",
+                name, _WARMUP_TIMEOUT,
+            )
+        except Exception as err:  # noqa: BLE001 - warm-up is best effort; the URL is stable
+            self._complain_once(
+                "warmup",
+                f"Could not warm up {name} ({describe_error(err)}); the first "
+                "recording or HLS open may fail and retry",
+            )
+
+    async def _release_warmup(self, name: str) -> None:
+        """Give the warm-up preload back once the real consumer has the chain."""
+        await asyncio.sleep(_WARMUP_RELEASE)
+        if (client := go2rtc_rest_client(self._hass)) is None:
+            return
+        try:
+            if name in await client.preload.list():
+                await client.preload.disable(name)
+                _LOGGER.debug("Released the warm-up preload on %s", name)
+        except Exception as err:  # noqa: BLE001 - best effort; go2rtc restarts clear preloads anyway
+            _LOGGER.debug(
+                "Could not release the warm-up preload on %s: %s", name, describe_error(err)
             )

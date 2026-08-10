@@ -515,7 +515,15 @@ revert restores the provider path with zero collateral.
   watching, check for a resident ffmpeg. If present, add `audio_codec_filter` to
   `preload.enable()` restricting the preload to native codecs.
 - [ ] **Open question — transcode start semantics:** confirm the ffmpeg AAC source starts only
-  when an AAC consumer attaches (recording/HLS), not on live view.
+  when an AAC consumer or the warm-up preload attaches (recording/HLS/stream_source), not on
+  live view (WHEP negotiates `_src` and must not start `_src_aac`'s ffmpeg).
+- [ ] **Cold start (the 2026-08-10 23:54 defect):** from fully cold — no live view, no preload,
+  3+ minutes idle — `camera.record` produces a playable clip with sound on the FIRST attempt,
+  and an HLS client (superdash) loads without spinning. Check the log for exactly one warm-up
+  arming and no "Invalid data" stream-worker errors.
+- [ ] **Warm-up winds down:** ~3 minutes after a stream_source() call with no consumer attached
+  (e.g. a failed cast), no ffmpeg is resident, no camera session is held, and
+  `preload.list` no longer shows `_src_aac`.
 - [ ] **Redial pressure:** unplug the camera with a recording active; confirm the circuit breaker
   holds and the vendor app reconnects afterwards.
 - [ ] Watch for camera-entity availability flapping during cooldown windows (new semantics).
