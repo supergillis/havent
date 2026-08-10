@@ -209,11 +209,24 @@ Tuya session and a first keyframe — ~5–8 s measured, longer than PyAV's pati
 
 So `stream_url()` **warms the chain before the URL goes out**: if go2rtc does not already report
 an active producer on `_src_aac`, it arms a *temporary* preload there (an API-side consumer, the
-same lever `keep_stream_running` uses — on a different name), polls until the producer is active
+same lever `keep_stream_running` uses — on a different name), polls until the chain is ready
 (bounded at 8 s: `stream_source()` itself runs under HA's 10 s
 `CAMERA_STREAM_SOURCE_TIMEOUT`, and PyAV's 5 s only starts after), and releases that preload 90 s
 later — by then the real consumer holds the chain, and if none ever came the chain winds down
-rather than streaming the camera for nobody. The check-then-enable is serialized so concurrent
+rather than streaming the camera for nobody.
+
+**Readiness is a frame, not an active producer.** The first build polled `streams.list()` for the
+producer connection existing, and the field promptly showed why that is not enough (2026-08-11
+00:25): PyAV dialed the instant the producer connection appeared, attached to a chain that was up
+but not yet delivering decodable video, and then consumed ~300 MB over 17 minutes without ever
+emitting a segment — while `camera.record` hung forever with **zero log lines**, because HA's
+recorder arms its duration timer only at the *first* segment (`StreamOutput._async_put` →
+`idle_timer.start()`) and has no zero-segment timeout at all; the same starvation is what an HLS
+client sees as loading forever. A fresh consumer attached at the same moment saw a perfectly
+healthy stream, so the wedge is an attach-during-build race, unrecoverable from inside the stuck
+session. The gate is therefore `GET /api/frame.jpeg` on `_src_aac`: a JPEG proves SPS plus a
+keyframe made it end to end — exactly the precondition PyAV's muxer needs. Each frame attempt is
+individually bounded (3 s) inside the 8 s budget. The check-then-enable is serialized so concurrent
 opens arm once; no lock is held across the polls; a preload armed by anyone else is neither
 re-armed (a preload PUT drops and redials its consumer) nor released. `keep_stream_running`'s
 own preload lives on `_src` and is untouched. The setup pass registers with `warm=False` —

@@ -64,6 +64,9 @@ class FakeState:
         self.fail_preload_with: BaseException | None = None
         self.fail_whep_with: BaseException | None = None
         self.fail_snapshot_with: BaseException | None = None
+        #: How many frame grabs fail before one succeeds — the chain
+        #: coming up. 0 = a frame right away; None = never (stone cold).
+        self.frames_until_ready: int | None = 0
 
 
 class FakeProducer:
@@ -181,6 +184,11 @@ def install_go2rtc(monkeypatch, hass, state, url="http://localhost:11984/"):
             state.calls.append(("frame.jpeg", name))
             if state.fail_snapshot_with is not None:
                 raise state.fail_snapshot_with
+            if state.frames_until_ready is None:
+                raise RuntimeError("no frame: chain not delivering")
+            if state.frames_until_ready > 0:
+                state.frames_until_ready -= 1
+                raise RuntimeError("no frame yet: chain still building")
             return b"\xff\xd8fake-jpeg"
 
     monkeypatch.setattr(preload_mod, "Go2RtcRestClient", FakeClient)
@@ -527,23 +535,47 @@ def test_cold_open_warms_the_chain(monkeypatch):
     assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
     assert ("preload.enable", AAC) in state.calls
     assert ("preload.enable", SRC) not in state.calls  # only the chain's head
+    assert ("frame.jpeg", AAC) in state.calls  # readiness is a frame, not a producer
 
 
 def test_warmup_skipped_when_chain_already_active(monkeypatch):
+    """An active chain is not re-armed — but it is still frame-checked:
+    "producer connection exists" was the gate that let PyAV attach to a
+    chain mid-build (see test_warmup_waits_for_a_frame...)."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     state.streams[SRC] = FakeStream(ACTIVE_SRC)
     state.streams[AAC] = FakeStream(ACTIVE_AAC)
     run(make_restreamer(hass).stream_url("cam1"))
     assert [c for c in state.calls if c[0] == "preload.enable"] == []
+    assert ("frame.jpeg", AAC) in state.calls
+
+
+def test_warmup_waits_for_a_frame_not_just_an_active_producer(monkeypatch):
+    """The wedge of 2026-08-11 00:25: the producer connection existed, so
+    the old gate said "warm" and PyAV attached to a chain that was not
+    yet delivering decodable video — the worker then consumed for 17
+    minutes without one segment, and camera.record hung forever (HA's
+    recorder arms its duration timer only at the first segment). The
+    warm-up must keep polling until a frame actually comes out."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[SRC] = FakeStream(ACTIVE_SRC)
+    state.streams[AAC] = FakeStream(ACTIVE_AAC)  # up, but not delivering yet
+    state.frames_until_ready = 2
+    assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert state.frames_until_ready == 0  # polled through the not-ready window
+    assert len([c for c in state.calls if c[0] == "frame.jpeg"]) == 3
 
 
 def test_warmup_timeout_still_returns_url(monkeypatch, caplog):
-    """The chain not coming up in time must not fail stream_source():
-    the URL is stable and the stream worker retries, warmer each time."""
+    """The chain never producing a frame in time must not fail
+    stream_source(): the URL is stable and the stream worker retries,
+    warmer each time."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     state.activate_on_preload = False
+    state.frames_until_ready = None  # stone cold: no frame, ever
     with caplog.at_level(logging.WARNING, logger="restream"):
         assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -610,7 +642,8 @@ def test_concurrent_cold_opens_arm_once_and_finish(monkeypatch):
     held across the polls — concurrent opens must all complete."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
-    state.activate_on_preload = False  # keep both callers polling
+    state.activate_on_preload = False
+    state.frames_until_ready = None  # keep both callers polling to the deadline
     restreamer = make_restreamer(hass)
 
     async def burst():

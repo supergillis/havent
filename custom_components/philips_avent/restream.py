@@ -92,6 +92,10 @@ MANAGED_RTSP = ("127.0.0.1", 18554)
 #: a measured ~5-8 s cold latency.
 _WARMUP_TIMEOUT = 8.0
 _WARMUP_POLL = 0.5
+#: Ceiling on a single frame probe inside the warm-up. go2rtc's frame
+#: handler itself waits for a keyframe, so one attempt can legitimately
+#: take a few seconds — but a stuck GET must not eat the whole budget.
+_WARMUP_FRAME_TIMEOUT = 3.0
 #: How long the warm-up preload holds the chain once the URL went out. By
 #: then the real consumer (PyAV) is attached and keeps the chain alive on
 #: its own; if none ever came, the chain winds down instead of streaming
@@ -399,14 +403,26 @@ class Restreamer:
         consumer — the same lever keep_stream_running uses, on a different
         name — that makes go2rtc start the chain now. We arm it only if
         nobody else has (a preload PUT over an existing one drops and
-        redials its consumer), poll until the stream reports an active
-        producer, and release our arming _WARMUP_RELEASE later, when the
-        real consumer holds the chain — or nobody came and it winds down.
-        keep_stream_running's own preload lives on `_src` and is never
-        released here. The locks: the check-then-enable is serialized so
-        two concurrent opens arm once, but no lock is held across the
-        polls. Never raises; a failed warm-up still hands out the URL —
-        the stream worker retries, warmer each time.
+        redials its consumer) and release our arming _WARMUP_RELEASE
+        later, when the real consumer holds the chain — or nobody came
+        and it winds down. keep_stream_running's own preload lives on
+        `_src` and is never released here.
+
+        Readiness is A FRAME, not an active producer. The first version
+        polled for the producer connection existing, and PyAV then dialed
+        a chain that was up but not yet delivering decodable video: the
+        worker attached mid-build, consumed the stream for 17 minutes
+        without ever emitting a segment, and camera.record hung forever —
+        HA's recorder has no zero-segment timeout, arms its duration
+        timer only at the FIRST segment, and logs nothing (field,
+        2026-08-11 00:25). A JPEG out of go2rtc's frame handler proves
+        SPS plus a keyframe made it end to end, which is exactly the
+        precondition PyAV's muxer needs.
+
+        The locks: the check-then-enable is serialized so two concurrent
+        opens arm once, but no lock is held across the frame polls. Never
+        raises; a failed warm-up still hands out the URL — the stream
+        worker retries, warmer each time.
         """
         if (client := go2rtc_rest_client(self._hass)) is None:
             return
@@ -414,24 +430,28 @@ class Restreamer:
         armed_here = False
         try:
             async with self._warm_lock:
-                streams = await client.streams.list()
-                if _looks_active(streams.get(name)):
-                    return  # already warm: a consumer or an earlier warm-up
                 if name not in await client.preload.list():
-                    await client.preload.enable(name)
-                    armed_here = True
+                    streams = await client.streams.list()
+                    if not _looks_active(streams.get(name)):
+                        await client.preload.enable(name)
+                        armed_here = True
             if armed_here:
                 self._hass.async_create_background_task(
                     self._release_warmup(name), f"philips_avent warmup release {name}"
                 )
-            deadline = asyncio.get_running_loop().time() + _WARMUP_TIMEOUT
-            while asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(_WARMUP_POLL)
-                streams = await client.streams.list()
-                if _looks_active(streams.get(name)):
-                    return
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + _WARMUP_TIMEOUT
+            while (remaining := deadline - loop.time()) > 0:
+                try:
+                    async with asyncio.timeout(min(_WARMUP_FRAME_TIMEOUT, remaining)):
+                        await client.get_jpeg_snapshot(name)
+                    return  # a frame end to end: PyAV can segment from here
+                except TimeoutError:
+                    continue  # the attempt ate its slice; deadline check re-loops
+                except Exception:  # noqa: BLE001 - not ready yet; that is what we are polling
+                    await asyncio.sleep(_WARMUP_POLL)
             _LOGGER.debug(
-                "%s did not come up within %.0fs; handing out the URL anyway",
+                "%s produced no frame within %.0fs; handing out the URL anyway",
                 name, _WARMUP_TIMEOUT,
             )
         except Exception as err:  # noqa: BLE001 - warm-up is best effort; the URL is stable
