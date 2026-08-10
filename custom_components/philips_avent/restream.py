@@ -71,6 +71,46 @@ _ALL_INTERFACES = ("", "0.0.0.0", "::", "[::]")
 MANAGED_RTSP = ("127.0.0.1", 18554)
 
 
+#: Source schemes as we configure them. `GET /api/streams` reports an IDLE
+#: producer as its configured source string, but an ACTIVE producer
+#: delegates serialization to its connection (go2rtc v1.9.14
+#: internal/streams/producer.go MarshalJSON: `if conn := p.conn; conn !=
+#: nil { return json.Marshal(conn) }`), whose url is the resolved form —
+#: an ffmpeg source comes back as the expanded `exec:ffmpeg ...` command
+#: line. A reported url outside these schemes therefore means "running",
+#: not "wrong".
+_CONFIGURED_SCHEMES = ("webrtc:", "ffmpeg:")
+
+
+def needs_registration(key_source: str, reported: list[str] | None) -> bool:
+    """Whether the check half of check-then-PUT should PUT.
+
+    `key_source` is the stream's identity source (the ws URL for `_src`);
+    `reported` is what go2rtc's API returned for the stream's producers, or
+    None when the stream does not exist. The table, biased hard toward
+    skip — a wrong re-PUT replaces the map entry without stopping the old
+    producers (go2rtc streams.New), whose immortal retry workers then fight
+    the new ones over the camera's one-consumer ws endpoint (the ~5s
+    Tuya-session storm of 2026-08-10); a wrong skip merely leaves a stale
+    source that self-corrects on the next entry reload:
+
+    - stream absent                          -> PUT (cold registration)
+    - key_source among the reported urls     -> skip (ours, idle match)
+    - any reported url not in a configured
+      scheme (e.g. `exec:...`)               -> skip (running; urls are
+                                                resolved, compare says
+                                                nothing — even a genuine
+                                                token change waits)
+    - all configured-form, key_source absent -> PUT (genuinely stale, idle)
+    """
+    if reported is None:
+        return True
+    if key_source in reported:
+        return False
+    # PUT only when every reported url is legible (idle, configured form).
+    return all(url.startswith(_CONFIGURED_SCHEMES) for url in reported)
+
+
 def parse_rtsp_endpoint(listen: str | None, api_host: str) -> tuple[str, int] | None:
     """(host, port) HA's stream worker can dial, or None to fall back."""
     if not listen:
@@ -257,7 +297,10 @@ class Restreamer:
     async def _ensure_registered(self, cam_id: str) -> None:
         """Check-then-PUT under the lock. PUT /api/streams silently replaces
         a live stream without stopping its producers, so a blind PUT here is
-        the same Tuya-session feedback loop preload.py refuses."""
+        the same Tuya-session feedback loop preload.py refuses — and the
+        check itself must tolerate go2rtc reporting ACTIVE producers in
+        resolved form (see needs_registration; a naive url compare re-PUT
+        every open while the stream ran, which WAS that feedback loop)."""
         if (client := go2rtc_rest_client(self._hass)) is None:
             return
         name = go2rtc_producer_name(cam_id)
@@ -265,8 +308,8 @@ class Restreamer:
         try:
             async with self._lock:
                 stream = (await client.streams.list()).get(name)
-                have = [p.url for p in stream.producers] if stream else None
-                if have != want:
+                reported = [p.url for p in stream.producers] if stream else None
+                if needs_registration(want[0], reported):
                     await client.streams.add(name, want)
                     # The name, never the sources: the ws URL embeds the token.
                     _LOGGER.info("Registered go2rtc producer stream %s", name)

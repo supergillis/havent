@@ -250,12 +250,63 @@ def test_no_put_when_already_registered_with_matching_sources(monkeypatch):
 
 
 def test_reput_when_sources_differ(monkeypatch):
+    """Token rotation, seen while the stream is IDLE: every reported url is
+    in configured form, none is our ws URL — genuinely stale, re-PUT."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     stale = WS.replace("t=tok", "t=old")
     state.streams[SRC] = FakeStream([stale, WANT[1]])
     run(make_restreamer(hass).stream_url("cam1"))
     assert adds(state) == [("streams.add", SRC, WANT)]
+
+
+#: How go2rtc reports the producers of a RUNNING stream: an active producer
+#: delegates serialization to its connection, so the ffmpeg template comes
+#: back as the expanded exec command line and the ws source as whatever its
+#: connection renders — neither equals the configured source string.
+ACTIVE = [
+    f"exec:ffmpeg -hide_banner -re -i rtsp://127.0.0.1:18554/{SRC}?video&audio -c:a aac ...",
+    "ws://127.0.0.1:38555/avent/cam1",
+]
+
+
+def test_no_reput_while_producers_are_active(monkeypatch):
+    """THE storm bug (field, 2026-08-10): active producers serialize in
+    resolved form, so a naive url compare mismatches exactly while the
+    stream is running — and every re-PUT orphans live producers whose
+    retry workers then churn Tuya sessions forever. Unrecognizable urls
+    mean running, not wrong: skip."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[SRC] = FakeStream(ACTIVE)
+    restreamer = make_restreamer(hass)
+    run(restreamer.stream_url("cam1"))
+    run(restreamer.stream_url("cam1"))
+    assert adds(state) == []
+
+
+def test_no_reput_on_token_change_while_active(monkeypatch):
+    """Even a genuine config change must not re-PUT over running producers:
+    we cannot tell a resolved url apart from a stale one, and a wrong skip
+    merely lasts until the next entry reload, while a wrong re-PUT is the
+    session storm. Skip wins."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[SRC] = FakeStream(ACTIVE)
+    restreamer = Restreamer(hass, partial(builtin_stream_url, 38555, "rotated"))
+    run(restreamer.stream_url("cam1"))
+    assert adds(state) == []
+
+
+def test_no_reput_when_only_the_ffmpeg_source_differs(monkeypatch):
+    """The ws URL is the identity: if it is present, the stream is ours and
+    registered. A drifted second source waits for the next entry reload
+    rather than risking a destructive PUT."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[SRC] = FakeStream([WS, "ffmpeg:somethingelse#audio=opus"])
+    run(make_restreamer(hass).stream_url("cam1"))
+    assert adds(state) == []
 
 
 def test_reregisters_after_go2rtc_restart(monkeypatch):
