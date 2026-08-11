@@ -66,7 +66,13 @@ ANSWER_TIMEOUT = 6.0
 #: pool holds 3-5 slots and a full pool closes newcomers, so redialling —
 #: which go2rtc does eagerly, twice per stream via its ffmpeg second source —
 #: only digs the hole deeper. No cloud call, no offer, until this expires.
+#: The base doubles per consecutive refusal up to COOLDOWN_MAX: the camera
+#: reclaims zombie slots over ~20 minutes, so a fixed 25 s redial against a
+#: full pool plants a fresh zombie per try and the pool never drains (field,
+#: 2026-08-11 10:59 — twelve dials inside 46 s of exhaustion). One answered
+#: handshake resets the ladder.
 COOLDOWN = 25.0
+COOLDOWN_MAX = 300.0
 #: A redial this soon after a successful answer means a second consumer is
 #: attached (go2rtc only redials when it has no producer). One camera, one
 #: consumer: two go2rtc instances will replace — and disconnect — each other.
@@ -97,6 +103,8 @@ class CameraSource:
     on_answered: Callable[[], None] | None = None
     last_error: str | None = None
     cooldown_until: float = 0.0
+    #: Consecutive no-answer handshakes, driving the exponential cooldown.
+    refusals: int = 0
 
 
 class Stream:
@@ -237,7 +245,10 @@ class StreamServer:
             # failed handshake too, and must free its slot like one.
             consumer_answer = rewrite_answer(camera_answer, offer)
         except TimeoutError as err:
-            source.cooldown_until = loop.time() + COOLDOWN
+            source.refusals += 1
+            source.cooldown_until = loop.time() + min(
+                COOLDOWN * 2 ** (source.refusals - 1), COOLDOWN_MAX
+            )
             stream.release("no answer", disconnect=True)
             raise SignalingError(
                 f"{source.name} did not answer within {ANSWER_TIMEOUT:.0f}s "
@@ -248,6 +259,7 @@ class StreamServer:
             raise
 
         source.cooldown_until = 0.0
+        source.refusals = 0
         stream.answered_at = loop.time()
         _LOGGER.debug("%s answered %s", source.name, describe(camera_answer))
 
