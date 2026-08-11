@@ -1,6 +1,7 @@
 """Philips Avent Baby Monitor integration for Home Assistant."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -39,7 +40,7 @@ from .const import (
 )
 from .coordinator import PhilipsAventCoordinator
 from .payload import BRIDGE_CONFIG_PREFIX, bridge_config_filename, build_bridge_config, orphan_bridge_configs
-from .preload import StreamPreloader
+from .preload import WATCHDOG_INTERVAL, StreamPreloader
 from .region import DEFAULT_DATA_CENTER, api_host, api_url_for_host
 from .restream import Restreamer
 from .signaling import Credentials, SignalingHub
@@ -393,6 +394,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_create_background_task(
         hass, _go2rtc_bookkeeping(), "philips_avent go2rtc bookkeeping"
     )
+
+    if preloader is not None:
+        # go2rtc's preload dials its producer exactly once, at PUT time; a
+        # producer that failed then (or died later) leaves an inert probe
+        # consumer that never redials — keep_stream_running held nothing
+        # all day on 2026-08-11 because the boot-time dial collapsed while
+        # signaling was still coming up. This watchdog is the redial: only
+        # when the server says the session is dead AND the no-answer
+        # cooldown is clear, so it can never drop a live producer or dig
+        # at an exhausted session pool.
+        server: StreamServer = hass.data[DOMAIN]["server"]
+
+        async def _preload_watchdog() -> None:
+            while True:
+                await asyncio.sleep(WATCHDOG_INTERVAL)
+                for cam_id in camera_ids:
+                    if server.session_live(cam_id) or server.dial_blocked(cam_id):
+                        continue
+                    await preloader.async_reassert(cam_id)
+
+        entry.async_create_background_task(
+            hass, _preload_watchdog(), "philips_avent preload watchdog"
+        )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 

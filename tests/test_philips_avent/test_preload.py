@@ -148,6 +148,28 @@ def test_concurrent_answers_put_once(monkeypatch):
     assert enables(state) == [("preload.enable", NAME)]
 
 
+def test_reassert_puts_even_over_an_armed_preload(monkeypatch):
+    """go2rtc's preload dials exactly once, at PUT time: a producer that
+    failed that dial (or died later) leaves an inert probe consumer that
+    never redials — keep_stream_running held nothing all day (field,
+    2026-08-11 12:45). The watchdog's re-PUT must therefore bypass the
+    already-armed skip; the caller has verified the producer is dead."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    pre = StreamPreloader(hass)
+    run(pre._async_enable("cam1"))
+    assert enables(state) == [("preload.enable", NAME)]
+    run(pre.async_reassert("cam1"))  # preload still listed, producer dead
+    assert enables(state) == [("preload.enable", NAME)] * 2
+
+
+def test_reassert_failure_never_raises(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_enable_with = TimeoutError()
+    run(StreamPreloader(hass).async_reassert("cam1"))  # next tick retries
+
+
 # -- resume and disable at setup -------------------------------------------
 
 

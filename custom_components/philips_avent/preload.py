@@ -72,6 +72,12 @@ _NO_GO2RTC = (
     "available; the stream will only run while someone is watching"
 )
 
+#: How often the watchdog checks that the preload's producer is actually
+#: connected. Cheap (an in-process liveness read; the re-PUT only on a
+#: verified-dead producer), and a minute of downtime is an acceptable gap
+#: for a stream whose whole point is being up all day.
+WATCHDOG_INTERVAL = 60.0
+
 
 def go2rtc_rest_client(hass: HomeAssistant) -> Go2RtcRestClient | None:
     """The rest client for HA's go2rtc, or None when there is none.
@@ -163,6 +169,35 @@ class StreamPreloader:
                 "Keeping stream %s permanently connected (go2rtc preload): the "
                 "camera now streams on the LAN whether or not anyone is watching",
                 name,
+            )
+
+    async def async_reassert(self, camera_id: str) -> None:
+        """Re-PUT the preload over a DEAD producer, so it dials again.
+
+        go2rtc's preload dials exactly once, at PUT time (streams
+        AddPreload -> AddConsumer -> prod.Dial). A producer that failed
+        that one dial — or died later — leaves an inert probe consumer
+        that never redials: on 2026-08-11 12:45 the boot-time enable
+        built a session that collapsed within seconds (signaling barely
+        up), and nothing ever dialled again; keep_stream_running held
+        nothing all day. The re-PUT removes the stale consumer and dials
+        fresh. ONLY the watchdog calls this, and only after checking the
+        producer session is dead and the dial cooldown is clear — a
+        re-PUT over a LIVE producer drops and redials it, the exact harm
+        _async_enable's already-armed skip exists to prevent.
+        """
+        if (client := self._client()) is None:
+            return
+        name = go2rtc_producer_name(camera_id)
+        try:
+            async with self._lock:
+                await client.preload.enable(name)
+            _LOGGER.info(
+                "Redialled the permanent stream for %s (its producer was down)", name
+            )
+        except Exception as err:  # noqa: BLE001 - the watchdog tries again next tick
+            _LOGGER.debug(
+                "Could not redial the permanent stream for %s: %s", name, describe_error(err)
             )
 
     async def async_resume(self, camera_ids: Iterable[str]) -> None:

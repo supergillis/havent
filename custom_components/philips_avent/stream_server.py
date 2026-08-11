@@ -165,6 +165,31 @@ class StreamServer:
     def cameras(self) -> dict[str, CameraSource]:
         return self._cameras
 
+    def session_live(self, camera_id: str) -> bool:
+        """Whether a producer session is currently up for this camera.
+
+        The preload watchdog's health signal: go2rtc's preload dials the
+        producer exactly once, at PUT time, and never redials a producer
+        that failed then or died later — so keep_stream_running needs
+        someone who can tell a held stream from an inert preload, and
+        this server is the one place that knows.
+        """
+        stream = self._streams.get(camera_id)
+        return stream is not None and not stream.released
+
+    def dial_blocked(self, camera_id: str) -> bool:
+        """Whether the no-answer cooldown currently refuses new dials.
+
+        The watchdog must not re-PUT while this holds: the redial would
+        be refused (or worse, plant another zombie in a full session
+        pool), which is exactly what the exponential cooldown exists to
+        prevent.
+        """
+        source = self._cameras.get(camera_id)
+        if source is None:
+            return True
+        return source.cooldown_until > asyncio.get_running_loop().time()
+
     def forget(self, stream: Stream) -> None:
         if self._streams.get(stream.camera_id) is stream:
             del self._streams[stream.camera_id]
