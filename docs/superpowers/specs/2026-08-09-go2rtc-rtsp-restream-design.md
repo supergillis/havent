@@ -226,7 +226,21 @@ client sees as loading forever. A fresh consumer attached at the same moment saw
 healthy stream, so the wedge is an attach-during-build race, unrecoverable from inside the stuck
 session. The gate is therefore `GET /api/frame.jpeg` on `_src_aac`: a JPEG proves SPS plus a
 keyframe made it end to end — exactly the precondition PyAV's muxer needs. Each frame attempt is
-individually bounded (3 s) inside the 8 s budget. The check-then-enable is serialized so concurrent
+individually bounded (3 s) inside the 8 s budget.
+
+**And the worker stamps wallclock, because the session's own timestamps cannot be trusted.** The
+frame gate was not the whole story: forensics on the wedged session's recording (54 minutes,
+1.1 GB, mp4 duration 0.9 s, no audio track) showed dts advancing **exactly 1 tick per frame** at
+90 kHz — ~1 s of stream-time per hour. Monotonic, so every validator in HA's worker passed it;
+segments never reached their duration cut, so HLS never produced a playable playlist and the
+recorder never saw a second segment. The camera's own stream is clean (fresh sessions probe with
+sane timestamps and SPS/PPS inline at every ~4 s IDR), so this is a per-session timestamp-mapping
+failure in the go2rtc RTSP hop, seen when a consumer attaches early in the ffmpeg push's life.
+`AventBuiltinCamera` therefore sets `stream_options["use_wallclock_as_timestamps"] = True` — one
+of the two options `STREAM_OPTIONS_SCHEMA` permits, built for exactly this pathology — which makes
+PyAV stamp packets on receipt and converts a broken-timestamp session into at-worst minor jitter.
+Over a loopback restream that jitter is negligible. (The Go bridge rebased timestamps for the same
+family of reason.) The check-then-enable is serialized so concurrent
 opens arm once; no lock is held across the polls; a preload armed by anyone else is neither
 re-armed (a preload PUT drops and redials its consumer) nor released. `keep_stream_running`'s
 own preload lives on `_src` and is untouched. The setup pass registers with `warm=False` —
