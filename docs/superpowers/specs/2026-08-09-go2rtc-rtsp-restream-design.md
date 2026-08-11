@@ -224,9 +224,17 @@ recorder arms its duration timer only at the *first* segment (`StreamOutput._asy
 `idle_timer.start()`) and has no zero-segment timeout at all; the same starvation is what an HLS
 client sees as loading forever. A fresh consumer attached at the same moment saw a perfectly
 healthy stream, so the wedge is an attach-during-build race, unrecoverable from inside the stuck
-session. The gate is therefore `GET /api/frame.jpeg` on `_src_aac`: a JPEG proves SPS plus a
-keyframe made it end to end — exactly the precondition PyAV's muxer needs. Each frame attempt is
-individually bounded (3 s) inside the 8 s budget.
+session. A frame gate — `GET /api/frame.jpeg` on `_src_aac`, a JPEG proving decodable video end to end —
+looked airtight and lasted half a day: go2rtc's frame handler is itself unreliable against this
+camera (extraction takes ~5.4 s — a ~4 s GOP at 1080p plus connect overhead — against the
+handler's own ~5 s patience, the same bug behind the intermittent stills), so the gate burned its
+whole budget confirming nothing and a cold record failed with "Invalid data" again (2026-08-11
+10:34). The gate is therefore **active-producer plus a 2 s settle**: wait until go2rtc reports
+the producer running, then hold the URL long enough for the fresh producer to have tracks ready
+for the consumer PyAV is about to be. The residual risk of attaching early — the
+collapsed-timestamp session below — is defused by wallclock stamping, and a warm-up that times
+out entirely (6 s) still converges: the armed preload holds the chain up across the stream
+worker's 10-then-more-second redials, so a later dial lands on a hot chain.
 
 **And the worker stamps wallclock, because the session's own timestamps cannot be trusted.** The
 frame gate was not the whole story: forensics on the wedged session's recording (54 minutes,
