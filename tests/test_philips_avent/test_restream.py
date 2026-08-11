@@ -67,6 +67,23 @@ class FakeState:
         #: Fail this many frame grabs before succeeding — the frame
         #: handler's coin-flip against a ~4 s GOP.
         self.fail_snapshot_times = 0
+        #: Override for /api/streams?src= media kinds. None derives them
+        #: from the stream's activity (active => both kinds, like a chain
+        #: whose tracks are all up). A list is consumed one entry per
+        #: poll, holding the last — ffmpeg registering video before AAC.
+        self.kinds_sequence: list[list[str]] | None = None
+
+    def media_kinds(self, name) -> list[str]:
+        if self.kinds_sequence is not None:
+            if len(self.kinds_sequence) > 1:
+                return self.kinds_sequence.pop(0)
+            return self.kinds_sequence[0]
+        stream = self.streams.get(name)
+        if stream and any(
+            not p.url.startswith(("webrtc:", "ffmpeg:")) for p in stream.producers
+        ):
+            return ["video", "audio"]
+        return []
 
 
 class FakeProducer:
@@ -150,13 +167,37 @@ class FakeResponse:
         return {"rtsp": {"listen": self._state.rtsp_listen}}
 
 
+class FakeDetailResponse:
+    """`GET /api/streams?src=` — the raw call _media_kinds makes."""
+
+    def __init__(self, state, name):
+        self._state = state
+        self._name = name
+        self.status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        kinds = self._state.media_kinds(self._name)
+        self._state.calls.append(("streams.detail", self._name, tuple(kinds)))
+        medias = [f"{kind}, recvonly, X" for kind in kinds]
+        return {"producers": [{"url": "exec:running", "medias": medias}]}
+
+
 class FakeSession:
-    """Duck-types the one aiohttp call the probe makes."""
+    """Duck-types the two raw aiohttp calls: the /api probe and the
+    /api/streams?src= track detail."""
 
     def __init__(self, state):
         self._state = state
 
-    def get(self, url):
+    def get(self, url, params=None):
+        if params and "src" in params:
+            return FakeDetailResponse(self._state, params["src"])
         self._state.probe_calls += 1
         if self._state.fail_probe_with is not None:
             raise self._state.fail_probe_with
@@ -570,6 +611,31 @@ def test_warmup_skipped_when_chain_already_active(monkeypatch):
     state.streams[AAC] = FakeStream(ACTIVE_AAC)
     run(make_restreamer(hass).stream_url("cam1"))
     assert [c for c in state.calls if c[0] == "preload.enable"] == []
+
+
+def test_warmup_waits_for_the_audio_track(monkeypatch):
+    """ffmpeg registers the video track before the AAC one, and a worker
+    that attaches in between gets a video-only SDP: "Audio stream not
+    found", a silent recording (field, 2026-08-11 10:50 and 15:25). The
+    gate must hold the URL until go2rtc's track list carries BOTH kinds."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.kinds_sequence = [["video"], ["video"], ["video", "audio"]]
+    assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    polls = [c for c in state.calls if c[0] == "streams.detail"]
+    assert len(polls) == 3  # held through the video-only window
+    assert polls[-1][2] == ("video", "audio")
+
+
+def test_warmup_video_only_forever_still_returns_url(monkeypatch, caplog):
+    """A camera with audio off must not lose HLS: past the deadline the
+    URL goes out anyway — a silent stream beats none."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.kinds_sequence = [["video"]]
+    with caplog.at_level(logging.WARNING, logger="restream"):
+        assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
 def test_warmup_never_consults_the_frame_handler(monkeypatch):

@@ -112,11 +112,11 @@ MANAGED_RTSP = ("127.0.0.1", 18554)
 #: a measured ~5-8 s cold latency.
 _WARMUP_TIMEOUT = 6.0
 _WARMUP_POLL = 0.5
-#: Grace between the producer turning active and handing out the URL: a
-#: producer that JUST connected may not have tracks ready for the
-#: consumer PyAV is about to be. Sized so timeout + settle + the cached
-#: probe stay under HA's 10 s CAMERA_STREAM_SOURCE_TIMEOUT.
-_WARMUP_SETTLE = 2.0
+#: Grace between both tracks appearing and handing out the URL — the
+#: track-to-SDP breath. Short: _media_kinds already proves the tracks a
+#: new consumer's SDP is built from exist. Sized so timeout + settle +
+#: the cached probe stay under HA's 10 s CAMERA_STREAM_SOURCE_TIMEOUT.
+_WARMUP_SETTLE = 1.0
 #: How long the warm-up preload holds the chain once the URL went out. By
 #: then the real consumer (PyAV) is attached and keeps the chain alive on
 #: its own; if none ever came, the chain winds down instead of streaming
@@ -313,6 +313,40 @@ class Restreamer:
         self._complain_once("probe", f"go2rtc /api probe failed ({reason})")
         return None
 
+    async def _media_kinds(self, name: str) -> set[str]:
+        """Which media kinds the stream's ACTIVE producers carry right now.
+
+        Raw `GET /api/streams?src=<name>` (whitelisted on the managed
+        instance, same session the /api probe rides): an active producer
+        serializes its `medias` — `"video, recvonly, H264"`,
+        `"audio, recvonly, AAC/8000"` — and those tracks are exactly what
+        go2rtc builds a new consumer's SDP from. go2rtc_client's typed
+        models stop at producer urls, hence the raw call. Empty set on
+        any failure or an idle stream; the caller polls.
+        """
+        config = self._hass.data.get(_GO2RTC_DATA)
+        url = getattr(config, "url", None)
+        session = getattr(config, "session", None)
+        if not url or session is None:
+            return set()
+        kinds: set[str] = set()
+        try:
+            async with asyncio.timeout(_PROBE_TIMEOUT):
+                async with session.get(
+                    url.rstrip("/") + "/api/streams", params={"src": name}
+                ) as resp:
+                    if resp.status != 200:
+                        return set()
+                    detail = await resp.json()
+        except Exception:  # noqa: BLE001 - a poll miss, not an event; the caller retries
+            return set()
+        for producer in (detail or {}).get("producers") or []:
+            for media in producer.get("medias") or []:
+                kind = str(media).split(",", 1)[0].strip()
+                if kind in ("video", "audio"):
+                    kinds.add(kind)
+        return kinds
+
     async def whep_answer(self, cam_id: str, offer_sdp: str) -> str | None:
         """Single-hop live view: negotiate the producer stream over WHEP.
 
@@ -427,30 +461,32 @@ class Restreamer:
         and it winds down. keep_stream_running's own preload lives on
         `_src` and is never released here.
 
-        Readiness is ACTIVE-PLUS-SETTLE, stamped safe by wallclock. Two
-        earlier gates each failed in the field. Polling for the producer
-        connection alone let PyAV attach to a just-started chain that
-        served collapsed timestamps — dts +1 tick/frame, so segments
-        never cut and camera.record hung silently for 54 minutes
-        (2026-08-11 00:25); that pathology is now defused where it bites,
-        by AventBuiltinCamera's use_wallclock_as_timestamps. Its
-        replacement — polling go2rtc's frame handler for a JPEG — proved
-        a dead gate: extraction from this camera takes ~5.4 s (a ~4 s GOP
-        at 1080p plus connect overhead) against the handler's own ~5 s
-        patience, so frame.jpeg 500s more often than not (the same
-        unreliability behind the intermittent stills), the gate burned
-        its whole budget confirming nothing, and a cold record failed
-        with "Invalid data" again (2026-08-11 10:34). So: wait until the
-        producer reports active, then hold the URL a settle period
-        longer so the fresh producer has tracks ready for the consumer
-        PyAV is about to be. The chain already hot skips the settle.
+        Readiness is BOTH TRACKS PRESENT, stamped safe by wallclock.
+        Three earlier gates each fell short in the field. Polling for
+        the producer connection alone let PyAV attach to a just-started
+        chain that served collapsed timestamps — dts +1 tick/frame, so
+        segments never cut and camera.record hung silently for 54
+        minutes (2026-08-11 00:25); that pathology is now defused where
+        it bites, by AventBuiltinCamera's use_wallclock_as_timestamps.
+        Polling go2rtc's frame handler for a JPEG proved a dead gate:
+        extraction from this camera takes ~5.4 s (a ~4 s GOP at 1080p
+        plus connect overhead) against the handler's own ~5 s patience,
+        so frame.jpeg 500s more often than not, and a cold record failed
+        with "Invalid data" again (10:34). Active-plus-settle fixed the
+        opens but not the SOUND: ffmpeg registers the video track before
+        the AAC one, a fixed settle sometimes loses that race, and the
+        worker attaches to a video-only SDP — "Audio stream not found",
+        a silent recording (10:50, 15:25). The gate is therefore
+        _media_kinds: go2rtc's own track list for the stream, the exact
+        material a new consumer's SDP is built from, polled until BOTH
+        kinds are present. A brief settle after that covers the
+        track-to-SDP breath; video-only past the deadline still hands
+        out the URL (a silent stream beats none, and the worker's
+        redials land on a chain the preload holds up).
 
         The locks: the check-then-enable is serialized so two concurrent
         opens arm once, but no lock is held across the polls. Never
-        raises; a failed warm-up still hands out the URL — the stream
-        worker retries every 10-then-more seconds, and the armed preload
-        holds the chain up across those retries, so even a slow cold
-        build is caught by a later dial.
+        raises; a failed warm-up still hands out the URL.
         """
         if (client := go2rtc_rest_client(self._hass)) is None:
             return
@@ -460,10 +496,9 @@ class Restreamer:
             async with self._warm_lock:
                 if name not in await client.preload.list():
                     streams = await client.streams.list()
-                    if _looks_active(streams.get(name)):
-                        return  # hot chain, serving consumers already
-                    await client.preload.enable(name)
-                    armed_here = True
+                    if not _looks_active(streams.get(name)):
+                        await client.preload.enable(name)
+                        armed_here = True
             if armed_here:
                 self._hass.async_create_background_task(
                     self._release_warmup(name), f"philips_avent warmup release {name}"
@@ -471,13 +506,12 @@ class Restreamer:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + _WARMUP_TIMEOUT
             while loop.time() < deadline:
-                await asyncio.sleep(_WARMUP_POLL)
-                streams = await client.streams.list()
-                if _looks_active(streams.get(name)):
+                if {"video", "audio"} <= await self._media_kinds(name):
                     await asyncio.sleep(_WARMUP_SETTLE)
                     return
+                await asyncio.sleep(_WARMUP_POLL)
             _LOGGER.debug(
-                "%s did not come up within %.0fs; handing out the URL anyway",
+                "%s did not carry both tracks within %.0fs; handing out the URL anyway",
                 name, _WARMUP_TIMEOUT,
             )
         except Exception as err:  # noqa: BLE001 - warm-up is best effort; the URL is stable
