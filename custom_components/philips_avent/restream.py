@@ -54,10 +54,30 @@ from urllib.parse import urlsplit
 
 try:
     from .const import go2rtc_aac_name, go2rtc_producer_name
-    from .preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
+    from .preload import (
+        _GO2RTC_DATA,
+        describe_error,
+        go2rtc_rest_client,
+    )
+    from .preload import (
+        CONFIGURED_SCHEMES as _CONFIGURED_SCHEMES,
+    )
+    from .preload import (
+        looks_active as _looks_active,
+    )
 except ImportError:  # imported outside the package, e.g. by the tests
     from const import go2rtc_aac_name, go2rtc_producer_name
-    from preload import _GO2RTC_DATA, describe_error, go2rtc_rest_client
+    from preload import (
+        _GO2RTC_DATA,
+        describe_error,
+        go2rtc_rest_client,
+    )
+    from preload import (
+        CONFIGURED_SCHEMES as _CONFIGURED_SCHEMES,
+    )
+    from preload import (
+        looks_active as _looks_active,
+    )
 
 try:
     from go2rtc_client import WebRTCSdpOffer
@@ -104,15 +124,9 @@ _WARMUP_SETTLE = 2.0
 _WARMUP_RELEASE = 90.0
 
 
-#: Source schemes as we configure them. `GET /api/streams` reports an IDLE
-#: producer as its configured source string, but an ACTIVE producer
-#: delegates serialization to its connection (go2rtc v1.9.14
-#: internal/streams/producer.go MarshalJSON: `if conn := p.conn; conn !=
-#: nil { return json.Marshal(conn) }`), whose url is the resolved form —
-#: an ffmpeg source comes back as the expanded `exec:ffmpeg ...` command
-#: line. A reported url outside these schemes therefore means "running",
-#: not "wrong".
-_CONFIGURED_SCHEMES = ("webrtc:", "ffmpeg:")
+# The configured-vs-resolved reading lives in preload.py now, shared with
+# the keep_stream_running watchdog, which needs the same producer-liveness
+# signal this module's registration compare reads.
 
 
 def needs_registration(key_source: str, reported: list[str] | None) -> bool:
@@ -142,18 +156,6 @@ def needs_registration(key_source: str, reported: list[str] | None) -> bool:
         return False
     # PUT only when every reported url is legible (idle, configured form).
     return all(url.startswith(_CONFIGURED_SCHEMES) for url in reported)
-
-
-def _looks_active(stream) -> bool:
-    """Whether go2rtc reports this stream as running.
-
-    Same signal needs_registration reads defensively: an active producer
-    serializes in resolved form, outside the schemes we configure. Absent
-    stream or all-configured-form producers means idle.
-    """
-    if stream is None:
-        return False
-    return any(not p.url.startswith(_CONFIGURED_SCHEMES) for p in stream.producers)
 
 
 def parse_rtsp_endpoint(listen: str | None, api_host: str) -> tuple[str, int] | None:

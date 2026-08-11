@@ -312,22 +312,20 @@ class TestCircuitBreaker:
         assert waits[3] == pytest.approx(waits[2], abs=0.005)
         assert source.refusals == 4
 
-    def test_watchdog_signals_track_the_session_and_the_cooldown(self, fast_timeout):
-        """session_live and dial_blocked are the preload watchdog's whole
-        contract: redial only a verifiably dead producer, never while the
-        no-answer cooldown holds."""
+    def test_dial_blocked_mirrors_the_cooldown(self):
+        """dial_blocked is the server's ONLY contribution to the preload
+        watchdog — it has no session-liveness signal to offer (go2rtc
+        closes the ws once ICE connects; the linger drops our state), so
+        it must never pretend otherwise."""
         hub = FakeHub()
         server, source = build(hub)
-        assert not server.session_live("cam1")
 
         async def go():
             assert not server.dial_blocked("cam1")
-            stream, _ = await server._negotiate(source, OFFER, sink)
-            assert server.session_live("cam1")
-            stream.release("test over")
-            assert not server.session_live("cam1")
             source.cooldown_until = asyncio.get_running_loop().time() + 30
             assert server.dial_blocked("cam1")
+            source.cooldown_until = 0.0
+            assert not server.dial_blocked("cam1")
             assert server.dial_blocked("cam-unknown")  # no source: never dial
 
         run(go())

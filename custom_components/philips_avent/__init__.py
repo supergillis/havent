@@ -398,21 +398,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if preloader is not None:
         # go2rtc's preload dials its producer exactly once, at PUT time; a
         # producer that failed then (or died later) leaves an inert probe
-        # consumer that never redials — keep_stream_running held nothing
-        # all day on 2026-08-11 because the boot-time dial collapsed while
-        # signaling was still coming up. This watchdog is the redial: only
-        # when the server says the session is dead AND the no-answer
-        # cooldown is clear, so it can never drop a live producer or dig
-        # at an exhausted session pool.
+        # consumer that never redials. The watchdog is the redial. Its
+        # liveness signal is go2rtc's own producer state — the signaling
+        # server has none once the linger dropped its bookkeeping — and
+        # the server contributes only the no-answer cooldown, so a redial
+        # never digs at an exhausted session pool.
         server: StreamServer = hass.data[DOMAIN]["server"]
 
         async def _preload_watchdog() -> None:
             while True:
                 await asyncio.sleep(WATCHDOG_INTERVAL)
-                for cam_id in camera_ids:
-                    if server.session_live(cam_id) or server.dial_blocked(cam_id):
-                        continue
-                    await preloader.async_reassert(cam_id)
+                await preloader.async_watchdog_tick(camera_ids, server.dial_blocked)
 
         entry.async_create_background_task(
             hass, _preload_watchdog(), "philips_avent preload watchdog"

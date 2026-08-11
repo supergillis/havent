@@ -54,6 +54,18 @@ class FakeState:
         self.fail_enable_with: BaseException | None = None
 
 
+class FakeProducer:
+    def __init__(self, url):
+        self.url = url
+
+
+class FakeStream:
+    """The go2rtc_client Stream model shape looks_active reads."""
+
+    def __init__(self, urls):
+        self.producers = [FakeProducer(u) for u in urls]
+
+
 class FakePreloadAPI:
     def __init__(self, state):
         self._state = state
@@ -148,26 +160,50 @@ def test_concurrent_answers_put_once(monkeypatch):
     assert enables(state) == [("preload.enable", NAME)]
 
 
-def test_reassert_puts_even_over_an_armed_preload(monkeypatch):
+def test_watchdog_redials_an_idle_producer(monkeypatch):
     """go2rtc's preload dials exactly once, at PUT time: a producer that
     failed that dial (or died later) leaves an inert probe consumer that
-    never redials — keep_stream_running held nothing all day (field,
-    2026-08-11 12:45). The watchdog's re-PUT must therefore bypass the
-    already-armed skip; the caller has verified the producer is dead."""
+    never redials. The tick's re-PUT must bypass the already-armed skip
+    once go2rtc reports the producer idle (configured-form url)."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"webrtc:ws://127.0.0.1/{NAME}"])  # idle
     pre = StreamPreloader(hass)
     run(pre._async_enable("cam1"))
     assert enables(state) == [("preload.enable", NAME)]
-    run(pre.async_reassert("cam1"))  # preload still listed, producer dead
+    run(pre.async_watchdog_tick(["cam1"], lambda cam: False))
     assert enables(state) == [("preload.enable", NAME)] * 2
 
 
-def test_reassert_failure_never_raises(monkeypatch):
+def test_watchdog_never_touches_an_active_producer(monkeypatch):
+    """A re-PUT over a LIVE producer drops and redials it — the churn
+    this feature exists to prevent. The first watchdog build did exactly
+    that every minute, by reading the signaling server's stream table as
+    liveness (field, 2026-08-11 13:34); go2rtc's resolved-form producer
+    url is the only trustworthy signal."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"exec:running {NAME}"])  # ACTIVE
+    run(StreamPreloader(hass).async_watchdog_tick(["cam1"], lambda cam: False))
+    assert enables(state) == []
+
+
+def test_watchdog_respects_the_dial_cooldown_and_unknown_streams(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"webrtc:ws://127.0.0.1/{NAME}"])  # idle
+    pre = StreamPreloader(hass)
+    run(pre.async_watchdog_tick(["cam1"], lambda cam: True))  # cooldown holds
+    run(pre.async_watchdog_tick(["cam-unregistered"], lambda cam: False))
+    assert enables(state) == []
+
+
+def test_watchdog_failure_never_raises(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"webrtc:ws://127.0.0.1/{NAME}"])
     state.fail_enable_with = TimeoutError()
-    run(StreamPreloader(hass).async_reassert("cam1"))  # next tick retries
+    run(StreamPreloader(hass).async_watchdog_tick(["cam1"], lambda cam: False))
 
 
 # -- resume and disable at setup -------------------------------------------

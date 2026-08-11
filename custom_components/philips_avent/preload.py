@@ -44,7 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 try:
@@ -73,10 +73,35 @@ _NO_GO2RTC = (
 )
 
 #: How often the watchdog checks that the preload's producer is actually
-#: connected. Cheap (an in-process liveness read; the re-PUT only on a
-#: verified-dead producer), and a minute of downtime is an acceptable gap
-#: for a stream whose whole point is being up all day.
+#: running. Cheap (one streams.list; the re-PUT only on a verified-idle
+#: producer), and a minute of downtime is an acceptable gap for a stream
+#: whose whole point is being up all day.
 WATCHDOG_INTERVAL = 60.0
+
+#: Source schemes as we configure them. `GET /api/streams` reports an IDLE
+#: producer as its configured source string, but an ACTIVE producer
+#: delegates serialization to its connection (go2rtc v1.9.14
+#: internal/streams/producer.go MarshalJSON: `if conn := p.conn; conn !=
+#: nil { return json.Marshal(conn) }`), whose url is the resolved form —
+#: an ffmpeg source comes back as the expanded `exec:ffmpeg ...` command
+#: line. A reported url outside these schemes therefore means "running",
+#: not "wrong". Shared with restream.py's registration compare.
+CONFIGURED_SCHEMES = ("webrtc:", "ffmpeg:")
+
+
+def looks_active(stream) -> bool:
+    """Whether go2rtc reports this stream as running.
+
+    An active producer serializes in resolved form, outside the schemes
+    we configure. Absent stream or all-configured-form producers means
+    idle. go2rtc is the one liveness authority for producers: the
+    signaling server cannot be — go2rtc closes the ws as soon as ICE
+    connects and the server drops its own state after the linger, so a
+    healthy hours-old session has no observable there.
+    """
+    if stream is None:
+        return False
+    return any(not p.url.startswith(CONFIGURED_SCHEMES) for p in stream.producers)
 
 
 def go2rtc_rest_client(hass: HomeAssistant) -> Go2RtcRestClient | None:
@@ -171,34 +196,57 @@ class StreamPreloader:
                 name,
             )
 
-    async def async_reassert(self, camera_id: str) -> None:
-        """Re-PUT the preload over a DEAD producer, so it dials again.
+    async def async_watchdog_tick(
+        self, camera_ids: Iterable[str], dial_blocked: Callable[[str], bool]
+    ) -> None:
+        """One health pass: redial preloads whose producer go2rtc reports idle.
 
         go2rtc's preload dials exactly once, at PUT time (streams
-        AddPreload -> AddConsumer -> prod.Dial). A producer that failed
-        that one dial — or died later — leaves an inert probe consumer
-        that never redials: on 2026-08-11 12:45 the boot-time enable
-        built a session that collapsed within seconds (signaling barely
-        up), and nothing ever dialled again; keep_stream_running held
-        nothing all day. The re-PUT removes the stale consumer and dials
-        fresh. ONLY the watchdog calls this, and only after checking the
-        producer session is dead and the dial cooldown is clear — a
-        re-PUT over a LIVE producer drops and redials it, the exact harm
-        _async_enable's already-armed skip exists to prevent.
+        AddPreload -> AddConsumer -> prod.Dial); a producer that failed
+        that dial, or died later, leaves an inert probe consumer that
+        never redials. This tick is the redial — and it also re-arms
+        after anything that silently ate the preload, since the re-PUT
+        arms and dials in one call.
+
+        The liveness signal is go2rtc's own producer serialization
+        (looks_active), because our signaling server has none: go2rtc
+        closes the ws as soon as ICE connects and the server drops its
+        state after the linger, so a healthy hours-old session looks
+        dead from there. The first watchdog build read exactly that
+        signal and re-PUT over a LIVE producer every minute — precisely
+        the churn this feature exists to prevent (field, 2026-08-11
+        13:34). Skips: an unregistered stream (the bookkeeping pass owns
+        registration), an ACTIVE producer (never drop a live one), and a
+        camera whose no-answer cooldown holds (never dig at a full
+        session pool).
         """
         if (client := self._client()) is None:
             return
-        name = go2rtc_producer_name(camera_id)
         try:
-            async with self._lock:
-                await client.preload.enable(name)
-            _LOGGER.info(
-                "Redialled the permanent stream for %s (its producer was down)", name
-            )
-        except Exception as err:  # noqa: BLE001 - the watchdog tries again next tick
-            _LOGGER.debug(
-                "Could not redial the permanent stream for %s: %s", name, describe_error(err)
-            )
+            streams = await client.streams.list()
+        except Exception as err:  # noqa: BLE001 - next tick tries again
+            _LOGGER.debug("Watchdog could not list go2rtc streams: %s", describe_error(err))
+            return
+        for camera_id in camera_ids:
+            name = go2rtc_producer_name(camera_id)
+            if name not in streams:
+                continue
+            if looks_active(streams[name]):
+                continue
+            if dial_blocked(camera_id):
+                continue
+            try:
+                async with self._lock:
+                    await client.preload.enable(name)
+                _LOGGER.info(
+                    "Redialled the permanent stream for %s (its producer was idle)", name
+                )
+            except Exception as err:  # noqa: BLE001 - the watchdog tries again next tick
+                _LOGGER.debug(
+                    "Could not redial the permanent stream for %s: %s",
+                    name,
+                    describe_error(err),
+                )
 
     async def async_resume(self, camera_ids: Iterable[str]) -> None:
         """Re-arm preload for streams go2rtc already knows.
