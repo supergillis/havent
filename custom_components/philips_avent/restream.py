@@ -90,12 +90,13 @@ MANAGED_RTSP = ("127.0.0.1", 18554)
 #: room left for the probe and registration; PyAV's own 5 s socket timeout
 #: only starts ticking after this, so the chain gets ~13 s in total against
 #: a measured ~5-8 s cold latency.
-_WARMUP_TIMEOUT = 8.0
+_WARMUP_TIMEOUT = 6.0
 _WARMUP_POLL = 0.5
-#: Ceiling on a single frame probe inside the warm-up. go2rtc's frame
-#: handler itself waits for a keyframe, so one attempt can legitimately
-#: take a few seconds — but a stuck GET must not eat the whole budget.
-_WARMUP_FRAME_TIMEOUT = 3.0
+#: Grace between the producer turning active and handing out the URL: a
+#: producer that JUST connected may not have tracks ready for the
+#: consumer PyAV is about to be. Sized so timeout + settle + the cached
+#: probe stay under HA's 10 s CAMERA_STREAM_SOURCE_TIMEOUT.
+_WARMUP_SETTLE = 2.0
 #: How long the warm-up preload holds the chain once the URL went out. By
 #: then the real consumer (PyAV) is attached and keeps the chain alive on
 #: its own; if none ever came, the chain winds down instead of streaming
@@ -408,21 +409,30 @@ class Restreamer:
         and it winds down. keep_stream_running's own preload lives on
         `_src` and is never released here.
 
-        Readiness is A FRAME, not an active producer. The first version
-        polled for the producer connection existing, and PyAV then dialed
-        a chain that was up but not yet delivering decodable video: the
-        worker attached mid-build, consumed the stream for 17 minutes
-        without ever emitting a segment, and camera.record hung forever —
-        HA's recorder has no zero-segment timeout, arms its duration
-        timer only at the FIRST segment, and logs nothing (field,
-        2026-08-11 00:25). A JPEG out of go2rtc's frame handler proves
-        SPS plus a keyframe made it end to end, which is exactly the
-        precondition PyAV's muxer needs.
+        Readiness is ACTIVE-PLUS-SETTLE, stamped safe by wallclock. Two
+        earlier gates each failed in the field. Polling for the producer
+        connection alone let PyAV attach to a just-started chain that
+        served collapsed timestamps — dts +1 tick/frame, so segments
+        never cut and camera.record hung silently for 54 minutes
+        (2026-08-11 00:25); that pathology is now defused where it bites,
+        by AventBuiltinCamera's use_wallclock_as_timestamps. Its
+        replacement — polling go2rtc's frame handler for a JPEG — proved
+        a dead gate: extraction from this camera takes ~5.4 s (a ~4 s GOP
+        at 1080p plus connect overhead) against the handler's own ~5 s
+        patience, so frame.jpeg 500s more often than not (the same
+        unreliability behind the intermittent stills), the gate burned
+        its whole budget confirming nothing, and a cold record failed
+        with "Invalid data" again (2026-08-11 10:34). So: wait until the
+        producer reports active, then hold the URL a settle period
+        longer so the fresh producer has tracks ready for the consumer
+        PyAV is about to be. The chain already hot skips the settle.
 
         The locks: the check-then-enable is serialized so two concurrent
-        opens arm once, but no lock is held across the frame polls. Never
+        opens arm once, but no lock is held across the polls. Never
         raises; a failed warm-up still hands out the URL — the stream
-        worker retries, warmer each time.
+        worker retries every 10-then-more seconds, and the armed preload
+        holds the chain up across those retries, so even a slow cold
+        build is caught by a later dial.
         """
         if (client := go2rtc_rest_client(self._hass)) is None:
             return
@@ -432,26 +442,24 @@ class Restreamer:
             async with self._warm_lock:
                 if name not in await client.preload.list():
                     streams = await client.streams.list()
-                    if not _looks_active(streams.get(name)):
-                        await client.preload.enable(name)
-                        armed_here = True
+                    if _looks_active(streams.get(name)):
+                        return  # hot chain, serving consumers already
+                    await client.preload.enable(name)
+                    armed_here = True
             if armed_here:
                 self._hass.async_create_background_task(
                     self._release_warmup(name), f"philips_avent warmup release {name}"
                 )
             loop = asyncio.get_running_loop()
             deadline = loop.time() + _WARMUP_TIMEOUT
-            while (remaining := deadline - loop.time()) > 0:
-                try:
-                    async with asyncio.timeout(min(_WARMUP_FRAME_TIMEOUT, remaining)):
-                        await client.get_jpeg_snapshot(name)
-                    return  # a frame end to end: PyAV can segment from here
-                except TimeoutError:
-                    continue  # the attempt ate its slice; deadline check re-loops
-                except Exception:  # noqa: BLE001 - not ready yet; that is what we are polling
-                    await asyncio.sleep(_WARMUP_POLL)
+            while loop.time() < deadline:
+                await asyncio.sleep(_WARMUP_POLL)
+                streams = await client.streams.list()
+                if _looks_active(streams.get(name)):
+                    await asyncio.sleep(_WARMUP_SETTLE)
+                    return
             _LOGGER.debug(
-                "%s produced no frame within %.0fs; handing out the URL anyway",
+                "%s did not come up within %.0fs; handing out the URL anyway",
                 name, _WARMUP_TIMEOUT,
             )
         except Exception as err:  # noqa: BLE001 - warm-up is best effort; the URL is stable
