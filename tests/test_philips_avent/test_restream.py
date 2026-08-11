@@ -64,6 +64,9 @@ class FakeState:
         self.fail_preload_with: BaseException | None = None
         self.fail_whep_with: BaseException | None = None
         self.fail_snapshot_with: BaseException | None = None
+        #: Fail this many frame grabs before succeeding — the frame
+        #: handler's coin-flip against a ~4 s GOP.
+        self.fail_snapshot_times = 0
 
 
 class FakeProducer:
@@ -179,6 +182,9 @@ def install_go2rtc(monkeypatch, hass, state, url="http://localhost:11984/"):
         async def get_jpeg_snapshot(self, name, width=None, height=None):
             # Mirrors the real top-level method (GET /api/frame.jpeg).
             state.calls.append(("frame.jpeg", name))
+            if state.fail_snapshot_times > 0:
+                state.fail_snapshot_times -= 1
+                raise TimeoutError("no keyframe within the handler's patience")
             if state.fail_snapshot_with is not None:
                 raise state.fail_snapshot_with
             return b"\xff\xd8fake-jpeg"
@@ -503,11 +509,25 @@ def test_snapshot_grabs_a_frame_from_the_producer(monkeypatch):
     assert adds(state) == BOTH  # registered before the grab
 
 
+def test_snapshot_retries_the_frame_handler_coin_flip(monkeypatch):
+    """One 500 does not lose the still: extraction takes ~5.4 s against
+    the handler's ~5 s patience with this camera's ~4 s GOP, so single
+    attempts fail about half the time (the intermittent stills — and the
+    stale superdash card — of 2026-08-11). The retry starts mid-GOP."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_snapshot_times = 1
+    assert run(make_restreamer(hass).snapshot("cam1")) == b"\xff\xd8fake-jpeg"
+    assert len([c for c in state.calls if c[0] == "frame.jpeg"]) == 2
+
+
 def test_snapshot_failure_returns_none(monkeypatch):
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     state.fail_snapshot_with = TimeoutError()
     assert run(make_restreamer(hass).snapshot("cam1")) is None
+    # Exactly two attempts: on a cold producer each one is a Tuya session.
+    assert len([c for c in state.calls if c[0] == "frame.jpeg"]) == 2
 
 
 def test_snapshot_none_when_no_go2rtc(monkeypatch):

@@ -345,18 +345,31 @@ class Restreamer:
         free; a cold grab dials the producer and stops it again — one Tuya
         session per cache miss, the same cost the old provider frame path
         had. Never raises: a still is decoration, not worth breaking.
+
+        One retry, because the frame handler is a coin flip against this
+        camera: extraction takes ~5.4 s (a ~4 s GOP at 1080p plus connect
+        overhead) against the handler's own ~5 s patience, so a single
+        attempt 500s roughly half the time — the intermittent stills of
+        2026-08-11. The retry starts a fresh wait mid-GOP and usually
+        lands; what still fails is absorbed by FrameCache serving the
+        stale frame for a TTL. Exactly one retry: on a cold producer each
+        attempt is a Tuya session, and a still is not worth three.
         """
         if (client := go2rtc_rest_client(self._hass)) is None:
             return None
         await self._ensure_registered(cam_id)
         name = go2rtc_producer_name(cam_id)
-        try:
-            return await client.get_jpeg_snapshot(name)
-        except Exception as err:  # noqa: BLE001 - a failed still must never raise into the cache
-            self._complain_once(
-                "snapshot", f"go2rtc frame grab for {name} failed ({describe_error(err)})"
-            )
-            return None
+        for attempt in (1, 2):
+            try:
+                return await client.get_jpeg_snapshot(name)
+            except Exception as err:  # noqa: BLE001 - a failed still must never raise into the cache
+                if attempt == 1:
+                    continue
+                self._complain_once(
+                    "snapshot",
+                    f"go2rtc frame grab for {name} failed twice ({describe_error(err)})",
+                )
+        return None
 
     async def _ensure_registered(self, cam_id: str) -> None:
         """Check-then-PUT under the lock. PUT /api/streams silently replaces
