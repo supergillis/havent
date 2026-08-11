@@ -136,6 +136,16 @@ class AventBuiltinCamera(AventCamera):
         super().__init__(coordinator, cam_id, stream_url="")
         self._restreamer = restreamer
         self._frame_cache = FrameCache(self._fetch_still, ttl=SNAPSHOT_TTL)
+        # A go2rtc RTSP session attached during the AAC chain's build-up
+        # can serve COLLAPSED timestamps: dts advancing 1 tick/frame at
+        # 90 kHz, ~1 s of stream-time per hour (field, 2026-08-11 — a
+        # 54-minute, 1.1 GB recording whose mp4 claimed 0.9 s; segments
+        # never reached their duration cut, so HLS never played and
+        # camera.record hung with nothing logged). Monotonic, so the
+        # stream worker's validators pass it. Wallclock stamping is the
+        # one supported stream option for exactly this, and over a
+        # loopback restream its jitter cost is negligible.
+        self.stream_options["use_wallclock_as_timestamps"] = True
 
     @property
     def use_stream_for_stills(self) -> bool:
