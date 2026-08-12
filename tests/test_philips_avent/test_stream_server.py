@@ -312,6 +312,24 @@ class TestCircuitBreaker:
         assert waits[3] == pytest.approx(waits[2], abs=0.005)
         assert source.refusals == 4
 
+    def test_only_the_window_opening_timeout_is_loud(self, fast_timeout):
+        """The timeout that ARMS a refusal window is the event; every dial
+        bounced off the armed cooldown is repetition — go2rtc redials every
+        few seconds for as long as the camera stays dark, and one overnight
+        outage wrote 400+ identical ERROR lines (2026-08-12)."""
+        hub = FakeHub(answer=None)
+        server, source = build(hub)
+
+        async def go():
+            with pytest.raises(SignalingError) as loud:
+                await server._negotiate(source, OFFER, sink)
+            with pytest.raises(SignalingError) as quiet:
+                await server._negotiate(source, OFFER, sink)
+            assert not getattr(loud.value, "quiet", False)
+            assert quiet.value.quiet
+
+        run(go())
+
     def test_dial_blocked_mirrors_the_cooldown(self):
         """dial_blocked is the server's ONLY contribution to the preload
         watchdog — it has no session-liveness signal to offer (go2rtc

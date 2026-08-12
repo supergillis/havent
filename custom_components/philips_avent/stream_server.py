@@ -70,9 +70,16 @@ ANSWER_TIMEOUT = 6.0
 #: reclaims zombie slots over ~20 minutes, so a fixed 25 s redial against a
 #: full pool plants a fresh zombie per try and the pool never drains (field,
 #: 2026-08-11 10:59 — twelve dials inside 46 s of exhaustion). One answered
-#: handshake resets the ladder.
+#: handshake resets the ladder. The cap balances two clocks: against the
+#: ~20 min zombie reclaim it bounds our outstanding zombies (a 5 min cap
+#: allowed ~4 — the size of the pool — through a 5.5-hour outage,
+#: 2026-08-12 overnight, 69 dials; 10 min allows at most 2, leaving slots
+#: free for the vendor apps even while we probe), and it is also the worst
+#: case recovery lag after the camera returns, so it must not grow into
+#: the half-hours. Resetting on LAN reappearance would beat both; noted
+#: for the polish pass.
 COOLDOWN = 25.0
-COOLDOWN_MAX = 300.0
+COOLDOWN_MAX = 600.0
 #: A redial this soon after a successful answer means a second consumer is
 #: attached (go2rtc only redials when it has no producer). One camera, one
 #: consumer: two go2rtc instances will replace — and disconnect — each other.
@@ -223,7 +230,8 @@ class StreamServer:
         if (remaining := source.cooldown_until - loop.time()) > 0:
             raise SignalingError(
                 f"{source.name} did not answer a recent offer; not dialling again "
-                f"for another {remaining:.0f}s so its session pool can drain"
+                f"for another {remaining:.0f}s so its session pool can drain",
+                quiet=True,
             )
 
         if (previous := self._streams.get(source.camera_id)) is not None:
@@ -350,7 +358,10 @@ class StreamServer:
                         stream.session.send_candidate(value)
         except (SignalingError, SdpError) as err:
             self._record_failure(source, err)
-            _LOGGER.error("Stream setup failed for %s: %s", source.name, err)
+            if getattr(err, "quiet", False):
+                _LOGGER.debug("Stream setup refused for %s: %s", source.name, err)
+            else:
+                _LOGGER.error("Stream setup failed for %s: %s", source.name, err)
             await self._report(ws, err)
         except Exception as err:
             self._record_failure(source, err)

@@ -40,7 +40,18 @@ CODEC_HEVC = 4
 
 
 class SignalingError(Exception):
-    """The cloud or the camera refused to set up a session."""
+    """The cloud or the camera refused to set up a session.
+
+    `quiet=True` marks a refusal that is pure repetition — a dial bounced
+    off an already-armed cooldown. The event that armed the window logged
+    at ERROR; go2rtc then redials every few seconds for as long as the
+    camera stays dark, and one overnight outage wrote 400+ identical
+    ERROR lines (2026-08-12). Repeats belong at debug.
+    """
+
+    def __init__(self, message: str, *, quiet: bool = False) -> None:
+        super().__init__(message)
+        self.quiet = quiet
 
 
 @dataclass(frozen=True)
