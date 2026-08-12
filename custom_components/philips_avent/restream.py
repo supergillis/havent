@@ -494,11 +494,19 @@ class Restreamer:
         armed_here = False
         try:
             async with self._warm_lock:
-                if name not in await client.preload.list():
-                    streams = await client.streams.list()
-                    if not _looks_active(streams.get(name)):
-                        await client.preload.enable(name)
-                        armed_here = True
+                streams = await client.streams.list()
+                if not _looks_active(streams.get(name)):
+                    # Idle producer: re-PUT even over a LISTED preload.
+                    # go2rtc's preload dials exactly once, at PUT time; a
+                    # dial that failed (say, the camera was dark when some
+                    # open armed it) leaves an inert entry, and skipping
+                    # "already armed" then starts nothing — every PyAV dial
+                    # bootstrapped the chain from zero and lost the 5s race
+                    # (field, 2026-08-12 08:47). Idle means no live
+                    # consumer exists for the re-PUT to drop; this is the
+                    # watchdog's rule, applied to the recording chain.
+                    await client.preload.enable(name)
+                    armed_here = True
             if armed_here:
                 self._hass.async_create_background_task(
                     self._release_warmup(name), f"philips_avent warmup release {name}"

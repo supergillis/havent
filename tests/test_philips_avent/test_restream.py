@@ -710,13 +710,15 @@ def test_warmup_release_skips_a_vanished_preload(monkeypatch):
     assert ("preload.disable", AAC) not in state.calls
 
 
-def test_no_preload_put_when_already_preloaded(monkeypatch):
-    """A preload PUT over an existing one drops and redials its consumer
-    (the same destructiveness preload.py documents), and an arming we did
-    not make is not ours to release."""
+def test_no_preload_put_over_an_active_chain(monkeypatch):
+    """A preload PUT over a RUNNING producer drops and redials its
+    consumer (the destructiveness preload.py documents). Active is the
+    only state that protects an armed preload from a re-PUT."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
-    state.preloads[AAC] = {}  # someone else holds it (e.g. the user)
+    state.streams[SRC] = FakeStream(ACTIVE_SRC)
+    state.streams[AAC] = FakeStream(ACTIVE_AAC)
+    state.preloads[AAC] = {}  # armed and doing its job
 
     async def scenario():
         await make_restreamer(hass).stream_url("cam1")
@@ -725,6 +727,19 @@ def test_no_preload_put_when_already_preloaded(monkeypatch):
     run(scenario())
     assert ("preload.enable", AAC) not in state.calls
     assert AAC in state.preloads  # never released by us
+
+
+def test_inert_preload_is_reput_when_the_chain_is_idle(monkeypatch):
+    """go2rtc's preload dials exactly once, at PUT time: an entry whose
+    dial failed (the camera was dark when some open armed it) is inert,
+    and skipping "already armed" then starts nothing — every PyAV dial
+    bootstrapped the chain from zero and lost the 5s race (field,
+    2026-08-12 08:47). Idle producer => re-PUT, the watchdog's rule."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.preloads[AAC] = {}  # listed, but its one dial failed long ago
+    assert run(make_restreamer(hass).stream_url("cam1")) == RTSP
+    assert ("preload.enable", AAC) in state.calls  # re-PUT dials fresh
 
 
 def test_concurrent_cold_opens_arm_once_and_finish(monkeypatch):
