@@ -185,6 +185,10 @@ class Restreamer:
         self._no_rtsp = False  # the permanent this-config-has-no-RTSP verdict
         self._lock = asyncio.Lock()  # serializes the check-then-PUT
         self._warm_lock = asyncio.Lock()  # serializes the check-then-preload; never held across polls
+        #: When WE last armed a warm-up preload, per stream name: an idle
+        #: producer within this window is one WE just told to dial (the
+        #: dial is in flight), not an inert entry to re-PUT over.
+        self._warm_armed_at: dict[str, float] = {}
         self._warned: set[str] = set()  # complaint kinds already warned about
 
     async def stream_url(self, cam_id: str, *, warm: bool = True) -> str:
@@ -493,9 +497,14 @@ class Restreamer:
         name = go2rtc_aac_name(cam_id)
         armed_here = False
         try:
+            loop = asyncio.get_running_loop()
             async with self._warm_lock:
                 streams = await client.streams.list()
-                if not _looks_active(streams.get(name)):
+                armed_recently = (
+                    loop.time() - self._warm_armed_at.get(name, float("-inf"))
+                    < _WARMUP_TIMEOUT + _WARMUP_SETTLE
+                )
+                if not _looks_active(streams.get(name)) and not armed_recently:
                     # Idle producer: re-PUT even over a LISTED preload.
                     # go2rtc's preload dials exactly once, at PUT time; a
                     # dial that failed (say, the camera was dark when some
@@ -503,15 +512,18 @@ class Restreamer:
                     # "already armed" then starts nothing — every PyAV dial
                     # bootstrapped the chain from zero and lost the 5s race
                     # (field, 2026-08-12 08:47). Idle means no live
-                    # consumer exists for the re-PUT to drop; this is the
-                    # watchdog's rule, applied to the recording chain.
+                    # consumer exists for the re-PUT to drop — UNLESS we
+                    # armed within the warm window ourselves, when idle
+                    # just means the dial is still in flight and a re-PUT
+                    # would abort it (hence armed_recently, which also
+                    # keeps concurrent opens to one arming).
                     await client.preload.enable(name)
+                    self._warm_armed_at[name] = loop.time()
                     armed_here = True
             if armed_here:
                 self._hass.async_create_background_task(
                     self._release_warmup(name), f"philips_avent warmup release {name}"
                 )
-            loop = asyncio.get_running_loop()
             deadline = loop.time() + _WARMUP_TIMEOUT
             while loop.time() < deadline:
                 if {"video", "audio"} <= await self._media_kinds(name):
