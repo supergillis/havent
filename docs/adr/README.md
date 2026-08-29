@@ -1,21 +1,20 @@
 # Architecture decision records
 
-One file per decision that was expensive to learn and would be expensive to undo. An ADR is not a
-design document — `docs/superpowers/specs/` holds those, and they describe how a thing works. An
-ADR records **why a choice was made, what it costs, and what evidence forced it**, so the next
-person (or the next model) does not re-litigate it from scratch or quietly revert it.
+Specs in `docs/superpowers/specs/` say how a thing works. These say why it was chosen and what it
+costs, so nobody re-litigates a decision or reverts it by accident.
 
-Write one when a decision meets any of these:
+Format: [Michael Nygard's template](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions)
+— Title, Status, Context, Decision, Consequences. Keep them short. Put numbers and dates in the
+context, not recollections. Number files in order, never renumber, and supersede rather than edit
+a decision away.
 
-- it was learned from the field rather than from documentation,
-- it trades one real good against another (latency vs smoothness, quality vs politeness),
-- the obvious-looking alternative is wrong for a non-obvious reason.
-
-Format: Status, Context, Decision, Consequences, Evidence. Keep the evidence section concrete —
-measurements with numbers and dates, not recollections. Number files sequentially and never
-renumber; supersede instead, linking both ways.
+Write one when the decision was learned from the field, trades one real good against another, or
+has an obvious-looking alternative that is wrong.
 
 | ADR | Title | Status |
 |----:|-------|--------|
 | [0001](0001-never-reconfigure-the-shared-camera.md) | Never reconfigure the shared camera for our own session | Accepted |
 | [0002](0002-rebase-timestamps-for-live-view.md) | Rebase timestamps in a dedicated live-view stream | Accepted |
+| [0003](0003-one-tuya-session-per-camera.md) | One Tuya session per camera | Accepted |
+| [0004](0004-native-webrtc-camera.md) | Native WebRTC camera, not Home Assistant's go2rtc provider | Accepted |
+| [0005](0005-check-before-put.md) | Check before PUT when registering go2rtc streams | Accepted |
