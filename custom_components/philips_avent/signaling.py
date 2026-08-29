@@ -286,7 +286,16 @@ class Session:
         })
 
     def send_resolution(self, value: int = 0) -> None:
-        """0 = HD, 1 = SD. Sent once the peer connection should be up."""
+        """0 = HD, 1 = SD. NOT sent automatically any more.
+
+        The frame rides PROTOCOL_CONTROL, so it is a device-wide mode
+        change rather than a request scoped to one session: sending it
+        after every answer reconfigured the camera's encoder and cut the
+        audio other consumers were listening to — the owner's parent unit
+        needed a manual restart (field, 2026-08-29). It also never
+        demonstrably worked: 720p persisted for months while we asked for
+        HD on every session. Kept as a deliberate lever, not a reflex.
+        """
         self._publish("resolution", PROTOCOL_CONTROL, {
             "mode": "webrtc", "cmdValue": value,
         })

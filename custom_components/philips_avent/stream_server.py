@@ -87,7 +87,6 @@ RECENT_ANSWER = 15.0
 #: How long a session keeps listening after the answer. Long enough to hear a
 #: stream that dies at birth, short enough that an abandoned one costs nothing.
 LINGER = 120.0
-RESOLUTION_DELAY = 1.5
 
 AUTH_FAILURES = ("SID_INVALID", "USER_SESSION_LOSS", "USER_SESSION_INVALID")
 
@@ -289,7 +288,16 @@ class StreamServer:
         stream.answered_at = loop.time()
         _LOGGER.debug("%s answered %s", source.name, describe(camera_answer))
 
-        stream.after(RESOLUTION_DELAY, session.send_resolution)
+        # No resolution command. We used to send `resolution` (HD) 1.5 s
+        # after every answer, but that frame rides PROTOCOL_CONTROL: it is
+        # a DEVICE-WIDE mode change, not a request scoped to our session,
+        # so the camera reconfigured its encoder and knocked the owner's
+        # parent unit off its audio, which had to be restarted by hand
+        # (field, 2026-08-29). It also never bought anything: the camera
+        # served 720p for months while we asked for HD every session, and
+        # today's 1080p arrived after a power cycle, not after a command.
+        # A cost with no measured benefit — send_resolution stays in
+        # signaling.py for anyone who wants to drive it deliberately.
         stream.after(LINGER, lambda: stream.release("linger expired"))
         if source.on_answered is not None:
             # Every answer, not just the first: a preload can stop doing
