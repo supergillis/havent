@@ -18,11 +18,18 @@ from restream import MANAGED_RTSP, Restreamer, parse_rtsp_endpoint
 WS = "webrtc:ws://127.0.0.1:38555/avent/cam1?t=tok"
 SRC = "philips_avent_cam1_src"
 AAC = "philips_avent_cam1_src_aac"
+LIVE = "philips_avent_cam1_src_live"
 FF = f"ffmpeg:{SRC}#video=copy#audio=aac"
+FF_LIVE = f"ffmpeg:{SRC}#video=copy#audio=copy#async"
 WANT_SRC = (WS,)
 WANT_AAC = (FF,)
-#: One registration pass registers both streams, producer first.
-BOTH = [("streams.add", SRC, WANT_SRC), ("streams.add", AAC, WANT_AAC)]
+WANT_LIVE = (FF_LIVE,)
+#: One registration pass registers all three streams, producer first.
+BOTH = [
+    ("streams.add", SRC, WANT_SRC),
+    ("streams.add", AAC, WANT_AAC),
+    ("streams.add", LIVE, WANT_LIVE),
+]
 RTSP = f"rtsp://127.0.0.1:18554/{AAC}"
 
 
@@ -63,6 +70,8 @@ class FakeState:
         self.fail_add_with: BaseException | None = None
         self.fail_preload_with: BaseException | None = None
         self.fail_whep_with: BaseException | None = None
+        #: Stream names whose WHEP negotiation fails (the rest succeed).
+        self.fail_whep_for: set[str] = set()
         self.fail_snapshot_with: BaseException | None = None
         #: Fail this many frame grabs before succeeding — the frame
         #: handler's coin-flip against a ~4 s GOP.
@@ -147,8 +156,8 @@ class FakeWebRTCAPI:
 
     async def forward_whep_sdp_offer(self, source_name, offer):
         self._state.calls.append(("webrtc.whep", source_name, offer.sdp))
-        if self._state.fail_whep_with is not None:
-            raise self._state.fail_whep_with
+        if self._state.fail_whep_with is not None or source_name in self._state.fail_whep_for:
+            raise self._state.fail_whep_with or RuntimeError("no such stream")
         return FakeSdpModel("v=0 fake-answer")
 
 
@@ -340,6 +349,7 @@ def test_no_put_when_already_registered_with_matching_sources(monkeypatch):
     install_go2rtc(monkeypatch, hass, state)
     state.streams[SRC] = FakeStream(list(WANT_SRC))
     state.streams[AAC] = FakeStream(list(WANT_AAC))
+    state.streams[LIVE] = FakeStream(list(WANT_LIVE))
     restreamer = make_restreamer(hass)
     run(restreamer.stream_url("cam1"))
     run(restreamer.stream_url("cam1"))
@@ -355,6 +365,7 @@ def test_reput_when_sources_differ(monkeypatch):
     stale = WS.replace("t=tok", "t=old")
     state.streams[SRC] = FakeStream([stale])
     state.streams[AAC] = FakeStream(list(WANT_AAC))
+    state.streams[LIVE] = FakeStream(list(WANT_LIVE))
     run(make_restreamer(hass).stream_url("cam1"))
     assert adds(state) == [("streams.add", SRC, WANT_SRC)]
 
@@ -365,6 +376,7 @@ def test_reput_when_sources_differ(monkeypatch):
 #: connection renders — neither equals the configured source string.
 ACTIVE_SRC = ["ws://127.0.0.1:38555/avent/cam1"]
 ACTIVE_AAC = [f"exec:ffmpeg -hide_banner -re -i rtsp://127.0.0.1:18554/{SRC} -c:v copy -c:a aac ..."]
+ACTIVE_LIVE = [f"exec:ffmpeg -use_wallclock_as_timestamps 1 -i rtsp://127.0.0.1:18554/{SRC} -c copy ..."]
 
 
 def test_no_reput_while_producers_are_active(monkeypatch):
@@ -377,6 +389,7 @@ def test_no_reput_while_producers_are_active(monkeypatch):
     install_go2rtc(monkeypatch, hass, state)
     state.streams[SRC] = FakeStream(ACTIVE_SRC)
     state.streams[AAC] = FakeStream(ACTIVE_AAC)
+    state.streams[LIVE] = FakeStream(ACTIVE_LIVE)
     restreamer = make_restreamer(hass)
     run(restreamer.stream_url("cam1"))
     run(restreamer.stream_url("cam1"))
@@ -392,6 +405,7 @@ def test_no_reput_on_token_change_while_active(monkeypatch):
     install_go2rtc(monkeypatch, hass, state)
     state.streams[SRC] = FakeStream(ACTIVE_SRC)
     state.streams[AAC] = FakeStream(ACTIVE_AAC)
+    state.streams[LIVE] = FakeStream(ACTIVE_LIVE)
     restreamer = Restreamer(hass, partial(builtin_stream_url, 38555, "rotated"))
     run(restreamer.stream_url("cam1"))
     assert adds(state) == []
@@ -404,6 +418,7 @@ def test_aac_stream_repairs_independently(monkeypatch):
     install_go2rtc(monkeypatch, hass, state)
     state.streams[SRC] = FakeStream(list(WANT_SRC))
     state.streams[AAC] = FakeStream(["ffmpeg:oldshape#audio=opus"])
+    state.streams[LIVE] = FakeStream(list(WANT_LIVE))
     run(make_restreamer(hass).stream_url("cam1"))
     assert adds(state) == [("streams.add", AAC, WANT_AAC)]
 
@@ -450,16 +465,30 @@ def test_registration_failure_still_returns_rtsp_url(monkeypatch, caplog):
 # -- whep_answer: single-hop live view --------------------------------------
 
 
-def test_whep_answer_negotiates_the_producer(monkeypatch):
-    """The offer goes to the _src stream (one hop, native PCMU), as a model
-    carrying the SDP; registration is ensured first so a fresh go2rtc can
-    answer."""
+def test_whep_answer_negotiates_the_rebased_stream(monkeypatch):
+    """The offer goes to _src_live, whose ffmpeg hop rebases this camera's
+    frozen video clock (measured 2026-08-29: every _src video packet at pts
+    0.000000 while its own audio advanced). Registration is ensured first
+    so a fresh go2rtc can answer."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     answer = run(make_restreamer(hass).whep_answer("cam1", "v=0 offer"))
     assert answer == "v=0 fake-answer"
-    assert ("webrtc.whep", SRC, "v=0 offer") in state.calls
+    assert ("webrtc.whep", LIVE, "v=0 offer") in state.calls
+    assert ("webrtc.whep", SRC, "v=0 offer") not in state.calls  # no needless fallback
     assert adds(state) == BOTH  # registered before the offer
+
+
+def test_whep_falls_back_to_the_raw_producer(monkeypatch):
+    """If the rebased stream cannot answer, live view must still work: the
+    fallback IS the pre-2026-08-29 behaviour, so the worst case of the
+    extra hop is the live view we already had, never a black card."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.fail_whep_for = {LIVE}
+    answer = run(make_restreamer(hass).whep_answer("cam1", "v=0 offer"))
+    assert answer == "v=0 fake-answer"
+    assert ("webrtc.whep", SRC, "v=0 offer") in state.calls
 
 
 def test_whep_answer_none_when_no_go2rtc(monkeypatch):

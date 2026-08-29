@@ -48,9 +48,19 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 try:
-    from .const import go2rtc_aac_name, go2rtc_producer_name, go2rtc_stream_name
+    from .const import (
+        go2rtc_aac_name,
+        go2rtc_live_name,
+        go2rtc_producer_name,
+        go2rtc_stream_name,
+    )
 except ImportError:  # imported outside the package, e.g. by the tests
-    from const import go2rtc_aac_name, go2rtc_producer_name, go2rtc_stream_name
+    from const import (
+        go2rtc_aac_name,
+        go2rtc_live_name,
+        go2rtc_producer_name,
+        go2rtc_stream_name,
+    )
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -292,6 +302,7 @@ class StreamPreloader:
                 for name in (
                     go2rtc_producer_name(camera_id),
                     go2rtc_aac_name(camera_id),
+                    go2rtc_live_name(camera_id),
                     go2rtc_stream_name(camera_id),
                 ):
                     if name in preloaded:

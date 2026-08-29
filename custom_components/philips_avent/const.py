@@ -232,6 +232,30 @@ def go2rtc_aac_name(cam_id: str) -> str:
     return name
 
 
+def go2rtc_live_name(cam_id: str) -> str:
+    """The go2rtc stream live view (WHEP) negotiates against.
+
+    ffmpeg pulling `_src`'s RTSP with both tracks COPIED — no transcode,
+    PCMU rides through as a codec browsers decode natively — for one
+    reason: the hop rebases timestamps. This camera's video RTP clock is
+    frozen (every packet pts 0.000000, measured against advancing audio
+    on the same stream and a control camera, 2026-08-29), so a browser
+    fed `_src` directly has nothing to schedule frames against: smooth
+    sound, stuttering picture. The recording path survives this because
+    HA's stream component stamps arrival times itself; live view never
+    touches that code, which is why the 2026-08-11 wallclock fix left it
+    broken. The Go bridge rebased timestamps for exactly this reason.
+    All four names MUST stay distinct; the asserts guard refactors.
+    """
+    name = quote(f"{DOMAIN}_{cam_id}_src_live", safe=_GO2RTC_SAFE_CHARS)
+    assert name not in (
+        go2rtc_stream_name(cam_id),
+        go2rtc_producer_name(cam_id),
+        go2rtc_aac_name(cam_id),
+    )
+    return name
+
+
 def builtin_stream_url(port: int, token: str, cam_id: str) -> str:
     """The signaling endpoint go2rtc dials to open this camera's session.
 

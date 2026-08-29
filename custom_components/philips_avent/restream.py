@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 try:
-    from .const import go2rtc_aac_name, go2rtc_producer_name
+    from .const import go2rtc_aac_name, go2rtc_live_name, go2rtc_producer_name
     from .preload import (
         _GO2RTC_DATA,
         describe_error,
@@ -66,7 +66,7 @@ try:
         looks_active as _looks_active,
     )
 except ImportError:  # imported outside the package, e.g. by the tests
-    from const import go2rtc_aac_name, go2rtc_producer_name
+    from const import go2rtc_aac_name, go2rtc_live_name, go2rtc_producer_name
     from preload import (
         _GO2RTC_DATA,
         describe_error,
@@ -234,6 +234,18 @@ class Restreamer:
         the camera: RTSP consumers fan out from the running producer."""
         return [f"ffmpeg:{go2rtc_producer_name(cam_id)}#video=copy#audio=aac"]
 
+    def live_sources(self, cam_id: str) -> list[str]:
+        """The live-view stream's source: `_src` with BOTH tracks copied
+        and `#async` — go2rtc's own flag for `-use_wallclock_as_timestamps
+        1 -async 1` (internal/ffmpeg). No transcode: PCMU is a codec
+        browsers decode natively, so the hop exists purely to rebase this
+        camera's frozen video clock (see go2rtc_live_name). Measured on
+        the live camera: `_src` gives 0 advancing timestamps, this hop
+        gives 158 over 10 s with an exact 10.0 s duration. Costs one
+        ffmpeg and a fraction of a second of latency; buys a picture the
+        browser can actually schedule."""
+        return [f"ffmpeg:{go2rtc_producer_name(cam_id)}#video=copy#audio=copy#async"]
+
     def _complain_once(self, kind: str, message: str) -> None:
         """One warning per complaint KIND; repeats drop to debug.
 
@@ -352,31 +364,41 @@ class Restreamer:
         return kinds
 
     async def whep_answer(self, cam_id: str, offer_sdp: str) -> str | None:
-        """Single-hop live view: negotiate the producer stream over WHEP.
+        """Live view over WHEP, against the timestamp-rebased stream.
 
-        A provider-style path would consume the AAC-filtered RTSP and
-        transcode PCMU→AAC→opus for every viewer; WHEP against `_src` keeps
-        the native audio and one hop, as frigate-hass-integration does.
+        `_src_live` first (see live_sources: both tracks copied, clock
+        rebased), `_src` second. The fallback is not ceremony — it is the
+        pre-2026-08-29 behaviour, so the worst case of the extra hop is
+        exactly the live view we already had, never a black card. A
+        provider-style path would instead transcode PCMU→AAC→opus per
+        viewer; both names here keep the camera's own codecs.
         Registration is ensured first so a freshly restarted go2rtc can
         answer. Returns None — never raises — when go2rtc or the client
-        model is missing or the call fails; the camera reports that to the
-        frontend, because a native-WebRTC entity has no provider to fall
-        back on.
+        model is missing or both names fail; the camera reports that to
+        the frontend, because a native-WebRTC entity has no provider to
+        fall back on.
         """
         if (client := go2rtc_rest_client(self._hass)) is None or WebRTCSdpOffer is None:
             return None
         await self._ensure_registered(cam_id)
-        name = go2rtc_producer_name(cam_id)
-        try:
-            answer = await client.webrtc.forward_whep_sdp_offer(name, WebRTCSdpOffer(offer_sdp))
-        except Exception as err:  # noqa: BLE001 - the camera turns None into a frontend error
-            self._complain_once(
-                "whep",
-                f"WHEP against {name} failed ({describe_error(err)}); live view "
-                "is down until go2rtc recovers",
-            )
-            return None
-        return answer.sdp
+        last_error: BaseException | None = None
+        for name in (go2rtc_live_name(cam_id), go2rtc_producer_name(cam_id)):
+            try:
+                answer = await client.webrtc.forward_whep_sdp_offer(
+                    name, WebRTCSdpOffer(offer_sdp)
+                )
+            except Exception as err:  # noqa: BLE001 - try the fallback, then report
+                # Per-name at debug: one live-view failure must produce one
+                # warning, not one per name we tried.
+                _LOGGER.debug("WHEP against %s failed: %s", name, describe_error(err))
+                last_error = err
+                continue
+            return answer.sdp
+        self._complain_once(
+            "whep",
+            f"Live view is down until go2rtc recovers ({describe_error(last_error)})",
+        )
+        return None
 
     async def snapshot(self, cam_id: str) -> bytes | None:
         """One JPEG via go2rtc's frame handler, on the producer stream.
@@ -429,6 +451,7 @@ class Restreamer:
                 for name, want in (
                     (go2rtc_producer_name(cam_id), self.sources(cam_id)),
                     (go2rtc_aac_name(cam_id), self.aac_sources(cam_id)),
+                    (go2rtc_live_name(cam_id), self.live_sources(cam_id)),
                 ):
                     stream = streams.get(name)
                     reported = [p.url for p in stream.producers] if stream else None
