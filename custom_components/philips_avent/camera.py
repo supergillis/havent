@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.camera import (
+    Camera,
+    CameraEntityFeature,
+    WebRTCAnswer,
+    WebRTCError,
+    WebRTCSendMessage,
+)
 from homeassistant.components.ffmpeg import async_get_image as ffmpeg_get_image
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -12,11 +18,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     CONF_BRIDGE_HOST,
     CONF_BRIDGE_PORT,
-    CONF_SIGNALING_PORT,
-    CONF_STREAM_TOKEN,
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
-    DEFAULT_SIGNALING_PORT,
     DOMAIN,
     build_rtsp_url,
     uses_builtin_backend,
@@ -24,6 +27,7 @@ from .const import (
 from .coordinator import PhilipsAventCoordinator
 from .entity import build_device_info
 from .frame_cache import FrameCache
+from .restream import Restreamer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,18 +39,6 @@ _LOGGER = logging.getLogger(__name__)
 SNAPSHOT_TTL = 60.0
 
 
-def builtin_stream_url(entry: ConfigEntry, cam_id: str) -> str:
-    """The signaling endpoint go2rtc should dial for this camera.
-
-    A `webrtc:` source, not an RTSP one: go2rtc accepts any scheme it supports
-    (`GET /api/schemes`), and Home Assistant's own go2rtc integration registers
-    whatever `stream_source()` returns without caring what the scheme is.
-    """
-    port = entry.options.get(CONF_SIGNALING_PORT, DEFAULT_SIGNALING_PORT)
-    token = entry.data.get(CONF_STREAM_TOKEN, "")
-    return f"webrtc:ws://127.0.0.1:{port}/avent/{cam_id}?t={token}"
-
-
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -56,20 +48,23 @@ async def async_setup_entry(
     bridge_host = entry.options.get(CONF_BRIDGE_HOST, DEFAULT_BRIDGE_HOST)
 
     async_add_entities(
-        AventCamera(
+        AventBuiltinCamera(coordinator, cam_id, data["restreamer"])
+        if builtin
+        else AventCamera(
             coordinator,
             cam_id,
-            builtin_stream_url(entry, cam_id)
-            if builtin
-            else build_rtsp_url(bridge_host, bridge_port, coordinator.camera_name, cam_id),
-            builtin=builtin,
+            build_rtsp_url(bridge_host, bridge_port, coordinator.camera_name, cam_id),
         )
         for cam_id, coordinator in data["coordinators"].items()
     )
 
 
 class AventCamera(Camera):
-    """Camera entity fed by whichever backend this entry uses."""
+    """The add-on backend's camera, and the shared base for the builtin one.
+
+    Add-on: the bridge's RTSP URL from stream_source(), ffmpeg stills, and
+    live view through HA's go2rtc WebRTC provider.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Camera"
@@ -80,40 +75,17 @@ class AventCamera(Camera):
         coordinator: PhilipsAventCoordinator,
         cam_id: str,
         stream_url: str,
-        *,
-        builtin: bool = False,
     ):
         super().__init__()
         self.coordinator = coordinator
         self._cam_id = cam_id
         self._stream_url = stream_url
-        self._frame_cache = FrameCache(self._fetch_still, ttl=SNAPSHOT_TTL) if builtin else None
+        self._frame_cache: FrameCache | None = None
         self._attr_unique_id = f"{cam_id}_camera"
         self._attr_device_info = build_device_info(coordinator, cam_id)
 
-    @property
-    def use_stream_for_stills(self) -> bool:
-        """Never route stills through go2rtc's /api/frame.jpeg.
-
-        go2rtc's frame handler (internal/mjpeg/mjpeg.go) does not share a
-        running stream: it dials the producer, waits for one keyframe, and
-        stops the producer again. With this property True, Home Assistant's
-        10 s thumbnail poll therefore opened a complete Tuya session every
-        10 seconds from an idle dashboard — enough to exhaust the camera's
-        3-5 slot session pool and lock the vendor app out. Builtin stills
-        are served from a TTL cache in async_camera_image instead; the
-        add-on backend keeps its ffmpeg path, which its RTSP URL supports.
-        """
-        return False
-
     async def stream_source(self) -> str:
         return self._stream_url
-
-    async def _fetch_still(self) -> bytes | None:
-        """One frame via go2rtc's frame path; the cache calls this at most once per TTL."""
-        if (provider := self.webrtc_provider) is None:
-            return None
-        return await provider.async_get_image(self)
 
     async def async_camera_image(
         self,
@@ -124,7 +96,7 @@ class AventCamera(Camera):
 
         Builtin backend: served from a TTL cache so the dashboard's 10 s
         still poll cannot open a Tuya session per poll (see
-        use_stream_for_stills). The frame may be up to SNAPSHOT_TTL old.
+        AventBuiltinCamera). The frame may be up to SNAPSHOT_TTL old.
 
         Add-on backend: unchanged — ffmpeg pulls one frame from the bridge's
         RTSP URL. The bridge fans its single Tuya session out to N RTSP
@@ -140,3 +112,79 @@ class AventCamera(Camera):
         except Exception:
             _LOGGER.exception("ffmpeg snapshot failed for %s", self._stream_url)
             return None
+
+
+class AventBuiltinCamera(AventCamera):
+    """Builtin backend: go2rtc's restream for HLS, native WebRTC live view.
+
+    A separate class, not flags on AventCamera, because Home Assistant
+    decides a camera is "native WebRTC" at the CLASS level — by whether
+    its type overrides async_handle_async_webrtc_offer — and a native
+    camera is never given a WebRTC provider. The override below must
+    therefore not exist on the add-on cameras, whose live view IS the
+    go2rtc provider.
+    """
+
+    def __init__(
+        self,
+        coordinator: PhilipsAventCoordinator,
+        cam_id: str,
+        restreamer: Restreamer,
+    ):
+        # The base's _stream_url is its ffmpeg-stills fallback; the frame
+        # cache below intercepts that path, so no URL is needed here.
+        super().__init__(coordinator, cam_id, stream_url="")
+        self._restreamer = restreamer
+        self._frame_cache = FrameCache(self._fetch_still, ttl=SNAPSHOT_TTL)
+        # A go2rtc RTSP session attached during the AAC chain's build-up
+        # can serve COLLAPSED timestamps: dts advancing 1 tick/frame at
+        # 90 kHz, ~1 s of stream-time per hour (field, 2026-08-11 — a
+        # 54-minute, 1.1 GB recording whose mp4 claimed 0.9 s; segments
+        # never reached their duration cut, so HLS never played and
+        # camera.record hung with nothing logged). Monotonic, so the
+        # stream worker's validators pass it. Wallclock stamping is the
+        # one supported stream option for exactly this, and over a
+        # loopback restream its jitter cost is negligible.
+        self.stream_options["use_wallclock_as_timestamps"] = True
+
+    @property
+    def use_stream_for_stills(self) -> bool:
+        """Never route stills through Home Assistant's stream component.
+
+        True would hold an open RTSP consumer on the producer for as long
+        as thumbnails are polled — an idle dashboard would keep the camera
+        streaming around the clock, keep_stream_running by accident.
+        Stills come from a TTL-cached go2rtc frame grab instead
+        (Restreamer.snapshot): free while the producer is hot, one Tuya
+        session per cache miss when it is cold.
+        """
+        return False
+
+    async def stream_source(self) -> str:
+        return await self._restreamer.stream_url(self._cam_id)
+
+    async def async_handle_async_webrtc_offer(
+        self, offer_sdp: str, session_id: str, send_message: WebRTCSendMessage
+    ) -> None:
+        """Negotiate the producer stream over WHEP — one hop, native PCMU —
+        as frigate-hass-integration does. Overriding this method is what
+        makes the camera native: no provider exists, so there is no
+        fallback — a failure is reported to the frontend, and live view is
+        down until go2rtc recovers."""
+        answer = await self._restreamer.whep_answer(self._cam_id, offer_sdp)
+        if answer is None:
+            send_message(
+                WebRTCError("webrtc_offer_failed", "go2rtc could not answer the stream")
+            )
+            return
+        send_message(WebRTCAnswer(answer))
+
+    async def async_on_webrtc_candidate(self, session_id: str, candidate) -> None:
+        """WHEP returned a complete answer — no trickle, candidates are
+        noise. The base would raise on a provider-less camera, and the
+        frontend sends its local candidates regardless."""
+
+    async def _fetch_still(self) -> bytes | None:
+        """One frame via go2rtc's frame handler on the producer stream; the
+        cache calls this at most once per TTL."""
+        return await self._restreamer.snapshot(self._cam_id)

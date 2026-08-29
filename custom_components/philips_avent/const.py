@@ -168,8 +168,10 @@ CONF_STREAM_TOKEN = "stream_token"
 # is watching — for instant stream opens and zero Tuya session churn, the
 # same one-long-lived-session behaviour the Go bridge has always had. Only
 # meaningful on the builtin backend. Driven through go2rtc's own preload
-# API, NOT Home Assistant's `preload_stream` camera preference, which would
-# feed our webrtc: URL to ffmpeg/HLS (see preload.py for the full why).
+# API against the producer stream, NOT Home Assistant's `preload_stream`
+# camera preference: that is another integration's user preference, and it
+# would arm the provider's `_camera` stream instead of the producer that
+# holds the Tuya session (see preload.py for the full why).
 CONF_KEEP_STREAM_RUNNING = "keep_stream_running"
 DEFAULT_KEEP_STREAM_RUNNING = False
 
@@ -196,6 +198,74 @@ def go2rtc_stream_name(cam_id: str) -> str:
     a mismatch would arm a stream that does not exist.
     """
     return quote(f"{DOMAIN}_{cam_id}_camera", safe=_GO2RTC_SAFE_CHARS)
+
+
+def go2rtc_producer_name(cam_id: str) -> str:
+    """The go2rtc stream that holds the camera's actual Tuya session.
+
+    Registered by restream.py with the signaling ws URL as its source;
+    everything else — HA's provider stream, HLS, recordings, frame grabs —
+    consumes this stream's RTSP. The name MUST differ from
+    go2rtc_stream_name() forever: HA's provider owns that name and would
+    overwrite ours, turning the camera stream's source into its own
+    restream (a loop). The suffixes `_src` vs `_camera` guarantee it; the
+    assert guards refactors that touch either.
+    """
+    name = quote(f"{DOMAIN}_{cam_id}_src", safe=_GO2RTC_SAFE_CHARS)
+    assert name != go2rtc_stream_name(cam_id)
+    return name
+
+
+def go2rtc_aac_name(cam_id: str) -> str:
+    """The go2rtc stream HA's stream component records from.
+
+    Single source: ffmpeg pulling `_src`'s RTSP, video copied and audio
+    transcoded to AAC (restream.py). A separate stream ON PURPOSE, not a
+    second source on `_src`: the ws endpoint serves exactly one consumer,
+    and a second source there gave go2rtc something to start, EOF and
+    redial against the very session that was already running — the
+    2026-08-10 Tuya-session storm. All three names MUST stay distinct;
+    the asserts guard refactors that touch any of them.
+    """
+    name = quote(f"{DOMAIN}_{cam_id}_src_aac", safe=_GO2RTC_SAFE_CHARS)
+    assert name not in (go2rtc_stream_name(cam_id), go2rtc_producer_name(cam_id))
+    return name
+
+
+def go2rtc_live_name(cam_id: str) -> str:
+    """The go2rtc stream live view (WHEP) negotiates against.
+
+    ffmpeg pulling `_src`'s RTSP with both tracks COPIED — no transcode,
+    PCMU rides through as a codec browsers decode natively — for one
+    reason: the hop rebases timestamps. This camera's video RTP clock is
+    frozen (every packet pts 0.000000, measured against advancing audio
+    on the same stream and a control camera, 2026-08-29), so a browser
+    fed `_src` directly has nothing to schedule frames against: smooth
+    sound, stuttering picture. The recording path survives this because
+    HA's stream component stamps arrival times itself; live view never
+    touches that code, which is why the 2026-08-11 wallclock fix left it
+    broken. The Go bridge rebased timestamps for exactly this reason.
+    All four names MUST stay distinct; the asserts guard refactors.
+    """
+    name = quote(f"{DOMAIN}_{cam_id}_src_live", safe=_GO2RTC_SAFE_CHARS)
+    assert name not in (
+        go2rtc_stream_name(cam_id),
+        go2rtc_producer_name(cam_id),
+        go2rtc_aac_name(cam_id),
+    )
+    return name
+
+
+def builtin_stream_url(port: int, token: str, cam_id: str) -> str:
+    """The signaling endpoint go2rtc dials to open this camera's session.
+
+    This URL is registered as the producer stream's source (restream.py);
+    what stream_source() hands out is normally the producer's RTSP URL,
+    and this ws URL is only the last-resort fallback when go2rtc has no
+    RTSP the stream component could reach. Pure on purpose: restream.py
+    must stay importable without Home Assistant.
+    """
+    return f"webrtc:ws://127.0.0.1:{port}/avent/{cam_id}?t={token}"
 
 
 def sanitize_rtsp_path(name: str, cam_id: str) -> str:

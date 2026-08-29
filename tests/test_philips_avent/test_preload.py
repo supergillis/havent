@@ -12,7 +12,7 @@ import logging
 import preload as preload_mod
 from preload import StreamPreloader, describe_error
 
-NAME = "philips_avent_cam1_camera"
+NAME = "philips_avent_cam1_src"  # the producer stream holds the session
 
 
 def run(coro):
@@ -52,6 +52,18 @@ class FakeState:
         self.calls: list[tuple] = []
         self.fail_list_with: BaseException | None = None
         self.fail_enable_with: BaseException | None = None
+
+
+class FakeProducer:
+    def __init__(self, url):
+        self.url = url
+
+
+class FakeStream:
+    """The go2rtc_client Stream model shape looks_active reads."""
+
+    def __init__(self, urls):
+        self.producers = [FakeProducer(u) for u in urls]
 
 
 class FakePreloadAPI:
@@ -124,8 +136,8 @@ def test_repeated_answers_put_once(monkeypatch):
 
 
 def test_rearm_after_external_disable(monkeypatch):
-    """HA's provider disables preloads it did not ask for (entity register/
-    unregister, camera-prefs update); the next answer must re-arm."""
+    """A go2rtc restart silently eats preloads (the provider used to disarm
+    the _camera name too, historically); the next answer must re-arm."""
     hass, state = FakeHass(), FakeState()
     install_go2rtc(monkeypatch, hass, state)
     pre = StreamPreloader(hass)
@@ -146,6 +158,52 @@ def test_concurrent_answers_put_once(monkeypatch):
 
     run(burst())
     assert enables(state) == [("preload.enable", NAME)]
+
+
+def test_watchdog_redials_an_idle_producer(monkeypatch):
+    """go2rtc's preload dials exactly once, at PUT time: a producer that
+    failed that dial (or died later) leaves an inert probe consumer that
+    never redials. The tick's re-PUT must bypass the already-armed skip
+    once go2rtc reports the producer idle (configured-form url)."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"webrtc:ws://127.0.0.1/{NAME}"])  # idle
+    pre = StreamPreloader(hass)
+    run(pre._async_enable("cam1"))
+    assert enables(state) == [("preload.enable", NAME)]
+    run(pre.async_watchdog_tick(["cam1"], lambda cam: False))
+    assert enables(state) == [("preload.enable", NAME)] * 2
+
+
+def test_watchdog_never_touches_an_active_producer(monkeypatch):
+    """A re-PUT over a LIVE producer drops and redials it — the churn
+    this feature exists to prevent. The first watchdog build did exactly
+    that every minute, by reading the signaling server's stream table as
+    liveness (field, 2026-08-11 13:34); go2rtc's resolved-form producer
+    url is the only trustworthy signal."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"exec:running {NAME}"])  # ACTIVE
+    run(StreamPreloader(hass).async_watchdog_tick(["cam1"], lambda cam: False))
+    assert enables(state) == []
+
+
+def test_watchdog_respects_the_dial_cooldown_and_unknown_streams(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"webrtc:ws://127.0.0.1/{NAME}"])  # idle
+    pre = StreamPreloader(hass)
+    run(pre.async_watchdog_tick(["cam1"], lambda cam: True))  # cooldown holds
+    run(pre.async_watchdog_tick(["cam-unregistered"], lambda cam: False))
+    assert enables(state) == []
+
+
+def test_watchdog_failure_never_raises(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.streams[NAME] = FakeStream([f"webrtc:ws://127.0.0.1/{NAME}"])
+    state.fail_enable_with = TimeoutError()
+    run(StreamPreloader(hass).async_watchdog_tick(["cam1"], lambda cam: False))
 
 
 # -- resume and disable at setup -------------------------------------------
@@ -170,6 +228,19 @@ def test_disable_stops_only_armed_preloads(monkeypatch):
     assert disables == [("preload.disable", NAME)]
 
 
+def test_disable_sweeps_every_name(monkeypatch):
+    """An upgrade may leave a preload armed under an older version's name —
+    `_camera` (provider era) or a stray `_src_aac` — and disabling must
+    stop them all, or go2rtc streams for nobody."""
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    state.preloads["philips_avent_cam1_camera"] = {}
+    state.preloads["philips_avent_cam1_src"] = {}
+    state.preloads["philips_avent_cam1_src_aac"] = {}
+    run(StreamPreloader(hass).async_disable(["cam1"]))
+    assert state.preloads == {}
+
+
 # -- degradation -----------------------------------------------------------
 
 
@@ -183,8 +254,30 @@ def test_enable_failure_never_raises(monkeypatch, caplog):
     assert "TimeoutError" in caplog.text
 
 
+def test_module_level_client_reads_the_same_slot(monkeypatch):
+    hass, state = FakeHass(), FakeState()
+    install_go2rtc(monkeypatch, hass, state)
+    assert preload_mod.go2rtc_rest_client(hass) is not None
+    hass.data.clear()
+    assert preload_mod.go2rtc_rest_client(hass) is None
+
+
 def test_describe_error_survives_cause_cycles():
     # A __cause__ cycle must not hang the warning path.
     a, b = ValueError("a"), ValueError("b")
     a.__cause__, b.__cause__ = b, a
     assert describe_error(a) == "ValueError: a <- caused by ValueError: b"
+
+
+def test_describe_error_redacts_query_strings():
+    """An HTTP error renders its request URL, and a failed streams PUT
+    carries the producer's ws source — token included — in the query."""
+    err = RuntimeError(
+        "400, message='Bad Request', "
+        "url='http://localhost:11984/api/streams?name=x&src=webrtc%3Aws%3A%2F%2F"
+        "127.0.0.1%3A38555%2Favent%2Fcam1%3Ft%3Dsecret-tok'"
+    )
+    text = describe_error(err)
+    assert "secret-tok" not in text
+    assert "<redacted>" in text
+    assert text.startswith("RuntimeError: 400, message='Bad Request'")

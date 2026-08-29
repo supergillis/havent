@@ -84,8 +84,11 @@ HA go2rtc provider ── streams.add() ──▶ go2rtc ──ws──▶ aioht
 
 ## Deliberately not supported
 
-- **HLS, `camera.record`, casting** — go2rtc's RTSP is loopback-only and `stream_source()` is no
-  longer RTSP. Fair trade for a baby monitor; the add-on backend still offers them.
+- **HLS, `camera.record`, casting** — since restored by the go2rtc RTSP restream
+  (`2026-08-09-go2rtc-rtsp-restream-design.md`): the producer is registered in go2rtc under its own
+  name and `stream_source()` serves that stream's loopback RTSP. The reasoning that stood here —
+  "go2rtc's RTSP is loopback-only" — conflated the tablet-without-HA case with HA's own stream
+  component, which runs on the same host and reaches loopback fine.
 - **HEVC** — the datachannel/fmp4 path has no equivalent in go2rtc's generic `webrtc:` source;
   Avent models stream H.264. `signaling.py` refuses HEVC skills with a clear error.
 - **HA remote from the camera's LAN** — HA clears go2rtc's ICE servers; same-LAN is unaffected

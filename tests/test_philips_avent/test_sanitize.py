@@ -1,4 +1,12 @@
-from const import DEFAULT_BRIDGE_HOST, build_rtsp_url, go2rtc_stream_name, sanitize_rtsp_path
+from const import (
+    DEFAULT_BRIDGE_HOST,
+    build_rtsp_url,
+    builtin_stream_url,
+    go2rtc_aac_name,
+    go2rtc_producer_name,
+    go2rtc_stream_name,
+    sanitize_rtsp_path,
+)
 
 
 def test_simple_name():
@@ -72,3 +80,37 @@ class TestGo2rtcStreamName:
 
     def test_matches_the_ha_identifier_shape(self):
         assert go2rtc_stream_name("bfa1b2c3d4e5f6") == "philips_avent_bfa1b2c3d4e5f6_camera"
+
+
+class TestGo2rtcProducerName:
+    def test_producer_name_shape(self):
+        assert go2rtc_producer_name("abc123") == "philips_avent_abc123_src"
+
+    def test_producer_name_never_collides_with_camera_stream_name(self):
+        """If the two were ever equal, HA's provider would register the camera
+        stream over our producer and its source would become its own restream —
+        a self-consuming loop go2rtc does not guard against."""
+        for cam_id in ("abc123", "weird id/☂", "", "_camera", "x_src"):
+            assert go2rtc_producer_name(cam_id) != go2rtc_stream_name(cam_id)
+
+    def test_aac_name_shape(self):
+        assert go2rtc_aac_name("abc123") == "philips_avent_abc123_src_aac"
+
+    def test_all_three_stream_names_stay_distinct(self):
+        """`_camera` (HA's provider), `_src` (the Tuya session) and
+        `_src_aac` (the recording transcode) each carry a different producer;
+        any collision would register one over another."""
+        for cam_id in ("abc123", "weird id/☂", "", "_camera", "x_src", "y_src_aac"):
+            names = {
+                go2rtc_stream_name(cam_id),
+                go2rtc_producer_name(cam_id),
+                go2rtc_aac_name(cam_id),
+            }
+            assert len(names) == 3
+
+
+def test_builtin_stream_url_is_pure():
+    assert (
+        builtin_stream_url(38555, "tok", "cam1")
+        == "webrtc:ws://127.0.0.1:38555/avent/cam1?t=tok"
+    )

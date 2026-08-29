@@ -5,24 +5,26 @@ long-lived Tuya session, always connected, instead of one per go2rtc dial.
 The lever is go2rtc's own preload API (`PUT /api/preload`): a preloaded
 stream keeps a permanent internal consumer attached, so the producer — our
 signaling endpoint, hence the Tuya session — is dialled once and never
-stopped. Home Assistant's own `preload_stream` camera preference is NOT the
-lever: it feeds `stream_source()` to an ffmpeg/HLS pipeline, which cannot
-open this backend's `webrtc:ws://` URL and logs "Protocol not found",
-forever — and it would mean writing another integration's user preference.
+stopped. What gets armed is the producer stream restream.py registers
+(`go2rtc_producer_name`, the `_src` name), the stream that actually holds
+the session — not the `_camera` stream HA's provider owns. That name choice
+also ends an old fragility: the provider enables and disables preload only
+for camera-identifier names (per its `preload_stream` preference, on entity
+register/unregister and any camera-prefs update), so our `_src` preload is
+out of its reach. Home Assistant's own `preload_stream` preference is still
+NOT the lever: it would arm the wrong stream, and it is another
+integration's user preference to boot.
 
-go2rtc only knows a stream once HA's go2rtc provider has registered it,
-which happens on the first dial, so there are two arming paths:
+Two arming paths:
 
 - `CameraSource.on_answered` (stream_server.py stays HA-free; __init__.py
-  passes `camera_answered` in). By then go2rtc necessarily knows the
-  stream — go2rtc is what dialled us. Every answer re-arms, because a
-  preload can stop doing its job behind our back: go2rtc restarted, or
-  HA's provider disabled it (it turns preload off for a camera whose
-  `preload_stream` preference is unset, on entity register/unregister and
-  on any camera-preferences update).
+  passes `camera_answered` in). Every answer re-arms, because a go2rtc
+  restart silently eats preloads and the answer is the earliest signal
+  that the producer is back in business.
 - `async_resume` at entry setup re-enables preload for streams go2rtc
-  still knows, so the option survives a reload. After a full HA restart
-  go2rtc starts empty; the stream goes hot at the first view or thumbnail.
+  still knows, so the option survives a reload — and it finds the stream
+  even on a cold start, because the same serialized bookkeeping task
+  (__init__.py) registers the producer first.
 
 Arming MUST check before it PUTs, because go2rtc's `PUT /api/preload` is
 destructive (internal/streams/preload.go, AddPreload): a PUT for an
@@ -41,13 +43,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 try:
-    from .const import go2rtc_stream_name
+    from .const import (
+        go2rtc_aac_name,
+        go2rtc_live_name,
+        go2rtc_producer_name,
+        go2rtc_stream_name,
+    )
 except ImportError:  # imported outside the package, e.g. by the tests
-    from const import go2rtc_stream_name
+    from const import (
+        go2rtc_aac_name,
+        go2rtc_live_name,
+        go2rtc_producer_name,
+        go2rtc_stream_name,
+    )
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -69,6 +82,57 @@ _NO_GO2RTC = (
     "available; the stream will only run while someone is watching"
 )
 
+#: How often the watchdog checks that the preload's producer is actually
+#: running. Cheap (one streams.list; the re-PUT only on a verified-idle
+#: producer), and a minute of downtime is an acceptable gap for a stream
+#: whose whole point is being up all day.
+WATCHDOG_INTERVAL = 60.0
+
+#: Source schemes as we configure them. `GET /api/streams` reports an IDLE
+#: producer as its configured source string, but an ACTIVE producer
+#: delegates serialization to its connection (go2rtc v1.9.14
+#: internal/streams/producer.go MarshalJSON: `if conn := p.conn; conn !=
+#: nil { return json.Marshal(conn) }`), whose url is the resolved form —
+#: an ffmpeg source comes back as the expanded `exec:ffmpeg ...` command
+#: line. A reported url outside these schemes therefore means "running",
+#: not "wrong". Shared with restream.py's registration compare.
+CONFIGURED_SCHEMES = ("webrtc:", "ffmpeg:")
+
+
+def looks_active(stream) -> bool:
+    """Whether go2rtc reports this stream as running.
+
+    An active producer serializes in resolved form, outside the schemes
+    we configure. Absent stream or all-configured-form producers means
+    idle. go2rtc is the one liveness authority for producers: the
+    signaling server cannot be — go2rtc closes the ws as soon as ICE
+    connects and the server drops its own state after the linger, so a
+    healthy hours-old session has no observable there.
+    """
+    if stream is None:
+        return False
+    return any(not p.url.startswith(CONFIGURED_SCHEMES) for p in stream.producers)
+
+
+def go2rtc_rest_client(hass: HomeAssistant) -> Go2RtcRestClient | None:
+    """The rest client for HA's go2rtc, or None when there is none.
+
+    Module-level so restream.py can share it; the name deliberately does
+    not shadow this module's `go2rtc_client` package import.
+    """
+    config = hass.data.get(_GO2RTC_DATA)
+    url = getattr(config, "url", None)
+    session = getattr(config, "session", None)
+    if Go2RtcRestClient is None or not url or session is None:
+        return None
+    return Go2RtcRestClient(session, url)
+
+
+#: Query strings never make it into a log line: an HTTP error from
+#: go2rtc_client renders the request URL, and a failed `streams.add` PUT
+#: carries the producer's ws source — stream token included — in its query.
+_QUERY_STRING = re.compile(r"\?[^\s'\"]+")
+
 
 def describe_error(err: BaseException) -> str:
     """A log-worthy account of an exception whose str() may be empty.
@@ -82,7 +146,7 @@ def describe_error(err: BaseException) -> str:
     cur: BaseException | None = err
     while cur is not None and id(cur) not in seen and len(parts) < 5:
         seen.add(id(cur))
-        text = str(cur)
+        text = _QUERY_STRING.sub("?<redacted>", str(cur))
         name = type(cur).__name__
         parts.append(f"{name}: {text}" if text else name)
         cur = cur.__cause__
@@ -99,13 +163,7 @@ class StreamPreloader:
         self._lock = asyncio.Lock()  # serializes the check-then-PUT
 
     def _client(self) -> Go2RtcRestClient | None:
-        """The rest client for HA's go2rtc, or None when there is none."""
-        config = self._hass.data.get(_GO2RTC_DATA)
-        url = getattr(config, "url", None)
-        session = getattr(config, "session", None)
-        if Go2RtcRestClient is None or not url or session is None:
-            return None
-        return Go2RtcRestClient(session, url)
+        return go2rtc_rest_client(self._hass)
 
     def _complain_once(self, message: str) -> None:
         """One warning per entry; repeats drop to debug so the log stays calm."""
@@ -125,7 +183,7 @@ class StreamPreloader:
         if (client := self._client()) is None:
             self._complain_once(_NO_GO2RTC)
             return
-        name = go2rtc_stream_name(camera_id)
+        name = go2rtc_producer_name(camera_id)
         try:
             async with self._lock:
                 if name in await client.preload.list():
@@ -148,12 +206,64 @@ class StreamPreloader:
                 name,
             )
 
+    async def async_watchdog_tick(
+        self, camera_ids: Iterable[str], dial_blocked: Callable[[str], bool]
+    ) -> None:
+        """One health pass: redial preloads whose producer go2rtc reports idle.
+
+        go2rtc's preload dials exactly once, at PUT time (streams
+        AddPreload -> AddConsumer -> prod.Dial); a producer that failed
+        that dial, or died later, leaves an inert probe consumer that
+        never redials. This tick is the redial — and it also re-arms
+        after anything that silently ate the preload, since the re-PUT
+        arms and dials in one call.
+
+        The liveness signal is go2rtc's own producer serialization
+        (looks_active), because our signaling server has none: go2rtc
+        closes the ws as soon as ICE connects and the server drops its
+        state after the linger, so a healthy hours-old session looks
+        dead from there. The first watchdog build read exactly that
+        signal and re-PUT over a LIVE producer every minute — precisely
+        the churn this feature exists to prevent (field, 2026-08-11
+        13:34). Skips: an unregistered stream (the bookkeeping pass owns
+        registration), an ACTIVE producer (never drop a live one), and a
+        camera whose no-answer cooldown holds (never dig at a full
+        session pool).
+        """
+        if (client := self._client()) is None:
+            return
+        try:
+            streams = await client.streams.list()
+        except Exception as err:  # noqa: BLE001 - next tick tries again
+            _LOGGER.debug("Watchdog could not list go2rtc streams: %s", describe_error(err))
+            return
+        for camera_id in camera_ids:
+            name = go2rtc_producer_name(camera_id)
+            if name not in streams:
+                continue
+            if looks_active(streams[name]):
+                continue
+            if dial_blocked(camera_id):
+                continue
+            try:
+                async with self._lock:
+                    await client.preload.enable(name)
+                _LOGGER.info(
+                    "Redialled the permanent stream for %s (its producer was idle)", name
+                )
+            except Exception as err:  # noqa: BLE001 - the watchdog tries again next tick
+                _LOGGER.debug(
+                    "Could not redial the permanent stream for %s: %s",
+                    name,
+                    describe_error(err),
+                )
+
     async def async_resume(self, camera_ids: Iterable[str]) -> None:
         """Re-arm preload for streams go2rtc already knows.
 
-        Runs after the platforms are set up, so the camera entity's
-        registration with HA's go2rtc provider — which disables a preload it
-        did not ask for — has already happened and cannot race us.
+        Runs inside __init__.py's serialized bookkeeping task, after the
+        registration pass — so on a cold start the producer is already
+        registered when this lists the streams, not found by luck.
         """
         if (client := self._client()) is None:
             self._complain_once(_NO_GO2RTC)
@@ -164,13 +274,13 @@ class StreamPreloader:
             self._complain_once(f"Could not list go2rtc streams ({describe_error(err)})")
             return
         for camera_id in camera_ids:
-            if go2rtc_stream_name(camera_id) in known:
+            if go2rtc_producer_name(camera_id) in known:
                 await self._async_enable(camera_id)
             else:
                 _LOGGER.debug(
-                    "go2rtc does not know %s yet; the stream goes hot at the "
-                    "first view or dashboard thumbnail",
-                    go2rtc_stream_name(camera_id),
+                    "go2rtc does not know %s (registration must have failed); "
+                    "the stream goes hot at the first view or dashboard thumbnail",
+                    go2rtc_producer_name(camera_id),
                 )
 
     async def async_disable(self, camera_ids: Iterable[str]) -> None:
@@ -178,20 +288,28 @@ class StreamPreloader:
 
         Also runs when the backend switched back to the add-on — a stale
         preload would otherwise keep go2rtc dialling a signaling server that
-        is no longer there, for nobody. Silent when go2rtc is absent: with
-        no go2rtc there is nothing that could still be preloading.
+        is no longer there, for nobody. Sweeps the `_src_aac` recording
+        stream and the old `_camera` name too: an upgrade or a stray hand
+        may have left a preload armed under a name this version no longer
+        arms. Silent when go2rtc is absent: with no go2rtc there is
+        nothing that could still be preloading.
         """
         if (client := self._client()) is None:
             return
         try:
             preloaded = await client.preload.list()
             for camera_id in camera_ids:
-                name = go2rtc_stream_name(camera_id)
-                if name in preloaded:
-                    await client.preload.disable(name)
-                    _LOGGER.info(
-                        "Stopped the permanent stream for %s (keep_stream_running is off)",
-                        name,
-                    )
+                for name in (
+                    go2rtc_producer_name(camera_id),
+                    go2rtc_aac_name(camera_id),
+                    go2rtc_live_name(camera_id),
+                    go2rtc_stream_name(camera_id),
+                ):
+                    if name in preloaded:
+                        await client.preload.disable(name)
+                        _LOGGER.info(
+                            "Stopped the permanent stream for %s (keep_stream_running is off)",
+                            name,
+                        )
         except Exception as err:  # noqa: BLE001 - best effort, never break setup
             _LOGGER.debug("Could not check or stop go2rtc preload: %s", describe_error(err))

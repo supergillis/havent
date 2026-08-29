@@ -281,9 +281,72 @@ class TestCircuitBreaker:
             await server._negotiate(source, OFFER, sink)
             # A successful answer must reset the breaker for the future.
             assert source.cooldown_until == 0.0
+            assert source.refusals == 0
 
         run(go())
         assert hub.opened == 2
+
+    def test_consecutive_refusals_grow_the_cooldown_exponentially(self, fast_timeout, monkeypatch):
+        """The camera reclaims zombie slots over ~20 minutes; a fixed 25s
+        redial against a full pool plants a fresh zombie per try and the
+        pool never drains (field, 2026-08-11 10:59). The ladder doubles
+        per refusal and caps at COOLDOWN_MAX."""
+        monkeypatch.setattr(module, "COOLDOWN", 0.01)
+        monkeypatch.setattr(module, "COOLDOWN_MAX", 0.04)
+        hub = FakeHub(answer=None)
+        server, source = build(hub)
+
+        async def go():
+            loop = asyncio.get_running_loop()
+            waits = []
+            for _ in range(4):
+                with pytest.raises(SignalingError, match="did not answer"):
+                    await server._negotiate(source, OFFER, sink)
+                waits.append(source.cooldown_until - loop.time())
+                source.cooldown_until = 0.0  # let the next dial through now
+            return waits
+
+        waits = run(go())
+        # 0.01, 0.02, 0.04, then capped at 0.04.
+        assert waits[0] < waits[1] < waits[2]
+        assert waits[3] == pytest.approx(waits[2], abs=0.005)
+        assert source.refusals == 4
+
+    def test_only_the_window_opening_timeout_is_loud(self, fast_timeout):
+        """The timeout that ARMS a refusal window is the event; every dial
+        bounced off the armed cooldown is repetition — go2rtc redials every
+        few seconds for as long as the camera stays dark, and one overnight
+        outage wrote 400+ identical ERROR lines (2026-08-12)."""
+        hub = FakeHub(answer=None)
+        server, source = build(hub)
+
+        async def go():
+            with pytest.raises(SignalingError) as loud:
+                await server._negotiate(source, OFFER, sink)
+            with pytest.raises(SignalingError) as quiet:
+                await server._negotiate(source, OFFER, sink)
+            assert not getattr(loud.value, "quiet", False)
+            assert quiet.value.quiet
+
+        run(go())
+
+    def test_dial_blocked_mirrors_the_cooldown(self):
+        """dial_blocked is the server's ONLY contribution to the preload
+        watchdog — it has no session-liveness signal to offer (go2rtc
+        closes the ws once ICE connects; the linger drops our state), so
+        it must never pretend otherwise."""
+        hub = FakeHub()
+        server, source = build(hub)
+
+        async def go():
+            assert not server.dial_blocked("cam1")
+            source.cooldown_until = asyncio.get_running_loop().time() + 30
+            assert server.dial_blocked("cam1")
+            source.cooldown_until = 0.0
+            assert not server.dial_blocked("cam1")
+            assert server.dial_blocked("cam-unknown")  # no source: never dial
+
+        run(go())
 
     def test_the_refusal_never_touches_a_live_stream(self):
         hub = FakeHub()

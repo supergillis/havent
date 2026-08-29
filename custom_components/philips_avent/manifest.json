@@ -1,6 +1,7 @@
 {
   "domain": "philips_avent",
   "name": "Philips Avent Baby Monitor",
+  "after_dependencies": ["go2rtc"],
   "codeowners": ["@thekoma"],
   "config_flow": true,
   "dependencies": [],

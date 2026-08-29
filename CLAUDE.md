@@ -100,3 +100,7 @@ Release workflow (`release.yml`): version pattern `YEAR.MONTH.INCREMENT`, multi-
   before pushing: `docker run --rm -v $PWD:/src -w /src golang:1.26-bookworm gofmt -w .` from
   `avent-webrtc-bridge/`
 - Reverse-engineering notes and methodology in `WHITEPAPER.md`
+- Design documents live in `docs/superpowers/specs/` (how a thing works); decisions that were
+  expensive to learn live in `docs/adr/` (why, what it costs, what evidence forced it). Read the
+  ADRs before changing the signalling handshake or the go2rtc stream topology — both contain
+  choices whose obvious-looking alternative is wrong for a non-obvious reason

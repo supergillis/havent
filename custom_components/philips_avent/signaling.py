@@ -40,7 +40,18 @@ CODEC_HEVC = 4
 
 
 class SignalingError(Exception):
-    """The cloud or the camera refused to set up a session."""
+    """The cloud or the camera refused to set up a session.
+
+    `quiet=True` marks a refusal that is pure repetition — a dial bounced
+    off an already-armed cooldown. The event that armed the window logged
+    at ERROR; go2rtc then redials every few seconds for as long as the
+    camera stays dark, and one overnight outage wrote 400+ identical
+    ERROR lines (2026-08-12). Repeats belong at debug.
+    """
+
+    def __init__(self, message: str, *, quiet: bool = False) -> None:
+        super().__init__(message)
+        self.quiet = quiet
 
 
 @dataclass(frozen=True)
@@ -275,7 +286,16 @@ class Session:
         })
 
     def send_resolution(self, value: int = 0) -> None:
-        """0 = HD, 1 = SD. Sent once the peer connection should be up."""
+        """0 = HD, 1 = SD. NOT sent automatically any more.
+
+        The frame rides PROTOCOL_CONTROL, so it is a device-wide mode
+        change rather than a request scoped to one session: sending it
+        after every answer reconfigured the camera's encoder and cut the
+        audio other consumers were listening to — the owner's parent unit
+        needed a manual restart (field, 2026-08-29). It also never
+        demonstrably worked: 720p persisted for months while we asked for
+        HD on every session. Kept as a deliberate lever, not a reflex.
+        """
         self._publish("resolution", PROTOCOL_CONTROL, {
             "mode": "webrtc", "cmdValue": value,
         })

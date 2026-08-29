@@ -66,7 +66,20 @@ ANSWER_TIMEOUT = 6.0
 #: pool holds 3-5 slots and a full pool closes newcomers, so redialling —
 #: which go2rtc does eagerly, twice per stream via its ffmpeg second source —
 #: only digs the hole deeper. No cloud call, no offer, until this expires.
+#: The base doubles per consecutive refusal up to COOLDOWN_MAX: the camera
+#: reclaims zombie slots over ~20 minutes, so a fixed 25 s redial against a
+#: full pool plants a fresh zombie per try and the pool never drains (field,
+#: 2026-08-11 10:59 — twelve dials inside 46 s of exhaustion). One answered
+#: handshake resets the ladder. The cap balances two clocks: against the
+#: ~20 min zombie reclaim it bounds our outstanding zombies (a 5 min cap
+#: allowed ~4 — the size of the pool — through a 5.5-hour outage,
+#: 2026-08-12 overnight, 69 dials; 10 min allows at most 2, leaving slots
+#: free for the vendor apps even while we probe), and it is also the worst
+#: case recovery lag after the camera returns, so it must not grow into
+#: the half-hours. Resetting on LAN reappearance would beat both; noted
+#: for the polish pass.
 COOLDOWN = 25.0
+COOLDOWN_MAX = 600.0
 #: A redial this soon after a successful answer means a second consumer is
 #: attached (go2rtc only redials when it has no producer). One camera, one
 #: consumer: two go2rtc instances will replace — and disconnect — each other.
@@ -74,7 +87,6 @@ RECENT_ANSWER = 15.0
 #: How long a session keeps listening after the answer. Long enough to hear a
 #: stream that dies at birth, short enough that an abandoned one costs nothing.
 LINGER = 120.0
-RESOLUTION_DELAY = 1.5
 
 AUTH_FAILURES = ("SID_INVALID", "USER_SESSION_LOSS", "USER_SESSION_INVALID")
 
@@ -97,6 +109,8 @@ class CameraSource:
     on_answered: Callable[[], None] | None = None
     last_error: str | None = None
     cooldown_until: float = 0.0
+    #: Consecutive no-answer handshakes, driving the exponential cooldown.
+    refusals: int = 0
 
 
 class Stream:
@@ -157,6 +171,24 @@ class StreamServer:
     def cameras(self) -> dict[str, CameraSource]:
         return self._cameras
 
+    def dial_blocked(self, camera_id: str) -> bool:
+        """Whether the no-answer cooldown currently refuses new dials.
+
+        The preload watchdog must not re-PUT while this holds: the
+        redial would be refused (or worse, plant another zombie in a
+        full session pool), which is exactly what the exponential
+        cooldown exists to prevent. Deliberately the server's ONLY
+        contribution to the watchdog: it has no session-liveness signal
+        to offer — go2rtc closes the ws once ICE connects and the linger
+        drops our bookkeeping — and the first watchdog build that read
+        our stream table as liveness re-PUT over healthy sessions every
+        minute (field, 2026-08-11 13:34).
+        """
+        source = self._cameras.get(camera_id)
+        if source is None:
+            return True
+        return source.cooldown_until > asyncio.get_running_loop().time()
+
     def forget(self, stream: Stream) -> None:
         if self._streams.get(stream.camera_id) is stream:
             del self._streams[stream.camera_id]
@@ -197,7 +229,8 @@ class StreamServer:
         if (remaining := source.cooldown_until - loop.time()) > 0:
             raise SignalingError(
                 f"{source.name} did not answer a recent offer; not dialling again "
-                f"for another {remaining:.0f}s so its session pool can drain"
+                f"for another {remaining:.0f}s so its session pool can drain",
+                quiet=True,
             )
 
         if (previous := self._streams.get(source.camera_id)) is not None:
@@ -237,7 +270,10 @@ class StreamServer:
             # failed handshake too, and must free its slot like one.
             consumer_answer = rewrite_answer(camera_answer, offer)
         except TimeoutError as err:
-            source.cooldown_until = loop.time() + COOLDOWN
+            source.refusals += 1
+            source.cooldown_until = loop.time() + min(
+                COOLDOWN * 2 ** (source.refusals - 1), COOLDOWN_MAX
+            )
             stream.release("no answer", disconnect=True)
             raise SignalingError(
                 f"{source.name} did not answer within {ANSWER_TIMEOUT:.0f}s "
@@ -248,10 +284,20 @@ class StreamServer:
             raise
 
         source.cooldown_until = 0.0
+        source.refusals = 0
         stream.answered_at = loop.time()
         _LOGGER.debug("%s answered %s", source.name, describe(camera_answer))
 
-        stream.after(RESOLUTION_DELAY, session.send_resolution)
+        # No resolution command. We used to send `resolution` (HD) 1.5 s
+        # after every answer, but that frame rides PROTOCOL_CONTROL: it is
+        # a DEVICE-WIDE mode change, not a request scoped to our session,
+        # so the camera reconfigured its encoder and knocked the owner's
+        # parent unit off its audio, which had to be restarted by hand
+        # (field, 2026-08-29). It also never bought anything: the camera
+        # served 720p for months while we asked for HD every session, and
+        # today's 1080p arrived after a power cycle, not after a command.
+        # A cost with no measured benefit — send_resolution stays in
+        # signaling.py for anyone who wants to drive it deliberately.
         stream.after(LINGER, lambda: stream.release("linger expired"))
         if source.on_answered is not None:
             # Every answer, not just the first: a preload can stop doing
@@ -320,7 +366,10 @@ class StreamServer:
                         stream.session.send_candidate(value)
         except (SignalingError, SdpError) as err:
             self._record_failure(source, err)
-            _LOGGER.error("Stream setup failed for %s: %s", source.name, err)
+            if getattr(err, "quiet", False):
+                _LOGGER.debug("Stream setup refused for %s: %s", source.name, err)
+            else:
+                _LOGGER.error("Stream setup failed for %s: %s", source.name, err)
             await self._report(ws, err)
         except Exception as err:
             self._record_failure(source, err)
