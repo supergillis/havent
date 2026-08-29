@@ -241,14 +241,33 @@ frame gate was not the whole story: forensics on the wedged session's recording 
 1.1 GB, mp4 duration 0.9 s, no audio track) showed dts advancing **exactly 1 tick per frame** at
 90 kHz — ~1 s of stream-time per hour. Monotonic, so every validator in HA's worker passed it;
 segments never reached their duration cut, so HLS never produced a playable playlist and the
-recorder never saw a second segment. The camera's own stream is clean (fresh sessions probe with
-sane timestamps and SPS/PPS inline at every ~4 s IDR), so this is a per-session timestamp-mapping
-failure in the go2rtc RTSP hop, seen when a consumer attaches early in the ffmpeg push's life.
+recorder never saw a second segment.
 `AventBuiltinCamera` therefore sets `stream_options["use_wallclock_as_timestamps"] = True` — one
 of the two options `STREAM_OPTIONS_SCHEMA` permits, built for exactly this pathology — which makes
 PyAV stamp packets on receipt and converts a broken-timestamp session into at-worst minor jitter.
-Over a loopback restream that jitter is negligible. (The Go bridge rebased timestamps for the same
-family of reason.) The check-then-enable is serialized so concurrent
+Over a loopback restream that jitter is negligible.
+
+**Correction, 2026-08-29: the cause is the camera, permanently — not a go2rtc session race.** This
+section originally blamed "a per-session timestamp-mapping failure in the go2rtc RTSP hop, seen
+when a consumer attaches early", on the strength of one apparently-clean probe. Direct measurement
+disproves it: on `_src`, **every** video packet reports pts 0.000000 while that same stream's audio
+advances normally (0.02, 0.04, 0.06…), and a control camera through go2rtc advances as expected
+(0.05, 0.10, 0.15…). Audio being correct on the same hop rules out go2rtc and rules out the
+measurement; the camera simply never advances its video RTP clock. The `_src_aac` hop inherits it
+as the +11 µs/frame collapse above (1 tick at 90 kHz). The Go bridge rebasing timestamps was the
+standing evidence for this, in this repository, the whole time.
+
+The consequence the wallclock fix did **not** cover: live view. Media flows camera → go2rtc →
+browser and never passes through HA's stream component, so WHEP against `_src` handed browsers a
+frozen clock — smooth audio, stuttering video, reported from the field and reproduced here. Live
+view therefore negotiates against a third stream, `_src_live`: `ffmpeg:<_src>#video=copy#audio=copy#async`,
+where `#async` is go2rtc's own flag for `-use_wallclock_as_timestamps 1 -async 1`
+(internal/ffmpeg). Both tracks are copied — PCMU is a codec browsers decode natively, so the hop
+exists purely to rebase the clock. Measured: `_src` yields 0 advancing timestamps; the hop yields
+158 over 10 s at an exact 10.0 s duration, video and audio intact. `whep_answer` falls back to
+`_src` if the rebased stream cannot answer, so the worst case of the extra hop is the live view
+that existed before it. Session cost is unchanged: `_src_live` consumes `_src`'s RTSP, exactly as
+`_src_aac` does. The check-then-enable is serialized so concurrent
 opens arm once; no lock is held across the polls; a preload armed by anyone else is neither
 re-armed (a preload PUT drops and redials its consumer) nor released. `keep_stream_running`'s
 own preload lives on `_src` and is untouched. The setup pass registers with `warm=False` —
