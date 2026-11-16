@@ -38,7 +38,7 @@ async def async_setup_entry(
 
 def _awake_delay(coordinator: PhilipsAventCoordinator, cam_id: str) -> list:
     return [
-        AventNumber(coordinator, cam_id, DPS_AWAKE_DELAY, None, "mdi:timer-outline", 0, 600, 30, "s", translation_key="awake_alert_delay")
+        AventNumber(coordinator, cam_id, DPS_AWAKE_DELAY, None, "mdi:timer-outline", 0, 3600, 30, "s", translation_key="awake_alert_delay")
     ]
 
 

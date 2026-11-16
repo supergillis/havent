@@ -16,6 +16,7 @@ from .const import (
     DPS_CRY_DET_SWITCH,
     DPS_MOTION_SWITCH,
     DPS_NIGHT_LIGHT,
+    DPS_NO_SIGNAL_ALERT_SWITCH,
     DPS_PRIVACY_MODE,
     DPS_SENSEIQ_SWITCH,
     DPS_SOUND_SWITCH,
@@ -51,6 +52,7 @@ async def async_setup_entry(
                 (DPS_SENSEIQ_SWITCH, "mdi:baby-face-outline", "senseiq"),
                 (DPS_AWAKE_SWITCH, "mdi:sleep-off", "awake_alert"),
                 (DPS_CRY_DET_SWITCH, "mdi:emoticon-cry-outline", "cry_alert"),
+                (DPS_NO_SIGNAL_ALERT_SWITCH, "mdi:signal-off", "no_signal_alert"),
             )
         ], entry.async_on_unload)
     async_add_entities(entities)
