@@ -120,6 +120,9 @@ def _stand_in_modules() -> dict[str, types.ModuleType]:
             BinarySensorDeviceClass=_Names(),
             BinarySensorEntity=type("BinarySensorEntity", (), {}),
         ),
+        "homeassistant.components.number": module(
+            "homeassistant.components.number", NumberEntity=type("NumberEntity", (), {})
+        ),
         "homeassistant.components.sensor": module(
             "homeassistant.components.sensor",
             SensorDeviceClass=_Names(),

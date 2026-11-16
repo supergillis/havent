@@ -162,6 +162,9 @@
       },
       "cry_alert": {
         "name": "Cry Alert"
+      },
+      "no_signal_alert": {
+        "name": "No-Signal Alert"
       }
     },
     "number": {

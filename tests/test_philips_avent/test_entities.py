@@ -5,7 +5,9 @@ logic they use: DPS parsing, URL construction, event detection patterns.
 """
 
 import json
+from types import SimpleNamespace
 
+import pytest
 from const import (
     CONF_BRIDGE_PORT,
     DEFAULT_BRIDGE_PORT,
@@ -30,6 +32,18 @@ from const import (
     lullaby_track_id,
     mirror_dps_to_cloud,
 )
+
+from .ha_stand_in import home_assistant_installed, load
+
+
+@pytest.mark.skipif(home_assistant_installed(), reason="uses a stand-in for Home Assistant")
+def test_awake_delay_number_range_matches_device_schema(monkeypatch):
+    number = load(monkeypatch, "number")
+    coordinator = SimpleNamespace(device_info={}, camera_name="Camera", data={})
+
+    [entity] = number._awake_delay(coordinator, "cam1")
+
+    assert (entity._attr_native_min_value, entity._attr_native_max_value, entity._attr_native_step) == (0, 3600, 30)
 
 
 class TestTemperatureSensor:

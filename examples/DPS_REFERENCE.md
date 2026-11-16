@@ -48,7 +48,7 @@ client.set_dps("YOUR_DEVICE_ID", {"201": "play"})   # play lullaby
 | 201 | `play_control` | Playback control | enum | rw | `play`, `pause`, `stop`, `next`, `prev` |
 | 202 | `play` | Play specific track | string | rw | track identifier |
 | 203 | `play_mode` | Loop mode | enum | rw | `loop`, `loop1`, `shuffle` |
-| 209 | `play_volume` | Volume | value | rw | 1–100 (step 1) |
+| 209 | `play_volume` | Volume | value | rw | 44–100 (step 1) |
 | 243 | `lullaby_timer_switch` | Timer enabled | bool | rw | true/false |
 | 244 | `lullaby_timer` | Auto-stop timer (seconds) | value | rw | 0–5400 |
 | 245 | `lullaby_display` | Timer remaining (seconds) | value | ro | -1–86400 |
@@ -81,6 +81,7 @@ client.set_dps("YOUR_DEVICE_ID", {"201": "play"})   # play lullaby
 | 139 | `decibel_switch` | Sound detection on/off | bool | rw | true/false |
 | 140 | `decibel_sensitivity` | Sound sensitivity | enum | rw | `0` (off), `1` (low), `2` (high) |
 | 141 | `decibel_upload` | Sound event (read-only) | string | ro | `decibel_upload` when triggered |
+| 212 | `initiative_message` | Alarm record with snapshot pointer | raw | rw | base64 JSON: `{"cmd":"ipc_motion","alarm":true,"time":...,"files":[...]}`; one slot holding the newest alarm. `cmd` is a reused Tuya code: the SCD953 posts `ipc_motion` and `ipc_bang`, the SenseIQ family `ipc_human` and `ipc_baby_cry` (see `events.py`). `ipc_custom` is not an alert: it is the cry-translation result "baby needs to burp", from Zoundream |
 | 239 | `monitor_sensitivity` | Background monitoring | enum | rw | `0`, `1`, `2`, `3` |
 
 The monitor runs one detector at a time. Measured at protocol 3.5 on an SCD973/26 in Leonard
@@ -119,15 +120,19 @@ centre — it rides these ordinary data points that `tuya.m.device.get` returns.
 | 5 | `sleepiq_consent` | SenseIQ consent | bool | rw | true/false |
 | 6 | `senseiq_diagnostics` | Diagnostics | raw | ro | — |
 | 7 | `sensiq_diag_consent` | Diagnostics consent | bool | rw | true/false |
-| 8 | `awake_delay` | Baby-awake alert delay | value | rw | seconds (e.g. 180) |
-| 9 | `cry_trans_result` | Cry translation result | string | ro | `"0"` = none (paid) |
-| 10 | `sleepiq_area` | SenseIQ detection area | string | rw | region JSON |
+| 8 | `awake_delay` | Baby-awake alert delay | value | rw | 0–3600 s (e.g. 180) |
+| 9 | `cry_trans_result` | Cry translation result | enum | ro | `"0"` to `"8"`, `"0"` = none (paid) |
+| 10 | `sleepiq_area` | SenseIQ detection area | string | rw | JSON: `{"num":1,"region0":{"x":16,"y":19,"xlen":62,"ylen":68}}` |
 | 11 | `awake_switch` | Baby-awake alert on/off | bool | rw | true/false |
 | 12 | `cry_det_switch` | Cry alert on/off | bool | rw | true/false |
 | 13 | `no_senseiq_switch` | "No SenseIQ signal" alert on/off | bool | rw | true/false |
+| 14 | `cry_trans_subscr` | Cry translation subscription | string | rw | JSON: `{"days_left":46,"status":"active","type":"f"}` |
 | 15 | `no_senseiq_signal` | No SenseIQ signal | bool | ro | NOTE: does **not** track live presence — stayed set overnight while breathing/sleep were reported. Read presence from DPS 3 `r` instead. |
 | 16 | `refurbish_counter` | Refurbishment counter | value | ro | — |
-| 18 | `device_errors` | Errors | value | ro | 0 = no error |
+| 17 | `cry_trans_token` | Cry translation token | raw | rw | cloud auth blob |
+| 18 | `device_errors` | Errors | bitmap | ro | fault bitmap, 0 = no error |
+| 19 | `bu_logs` | Base unit logs | raw | ro | base64(hex(JSON)) |
+| 20 | `pu_logs` | Parent unit logs | raw | ro | base64(hex(JSON)) |
 | 21 | `ext_functions` | Extended functions | value | rw | — |
 
 **DPS 3 `sleepiq_status`** — live JSON string:
@@ -140,6 +145,13 @@ flag: `"o"` = no baby (empty crib); `"m"`, `"b"` and `"a"` were all observed
 while the baby was detected (over one night on an SCD9xx). Presence is therefore
 `r != "o"` (or `br > 0`). Leonard Pitzu's fork, working on an SCD973, reads `b` as lying still
 with a breathing rate measured and `m` as moving. The Baby Moving sensor is on while `r` is `m`.
+
+The APK strings list five values for `r`: moving, breathing, no-signal, out-of-crib
+and analyzing (credited to github.com/eisbaw/babymonitor-client). Field checks on an SCD953:
+
+- `m` matched the app showing "Movement" on 2026-08-10 at 21:22, with `br` 0.
+- DPS 4 `css` = `d` matched the app showing deep sleep on 2026-08-09.
+- Unconfirmed: `a` may mean "analyzing" rather than "present".
 
 **DPS 4 `sleep_session_data`** — base64 of an ASCII-hex string of JSON:
 

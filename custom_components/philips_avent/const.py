@@ -87,6 +87,7 @@ DPS_SENSEIQ_SWITCH = "1"       # sleepiq_switch  (bool) SenseIQ on/off
 DPS_AWAKE_DELAY = "8"          # awake_delay     (value, seconds) awake-alert delay
 DPS_AWAKE_SWITCH = "11"        # awake_switch    (bool) baby-awake alert on/off
 DPS_CRY_DET_SWITCH = "12"      # cry_det_switch  (bool) cry alert on/off
+DPS_NO_SIGNAL_ALERT_SWITCH = "13"  # no_senseiq_switch (bool) SenseIQ no-signal alert on/off
 DPS_NO_SENSEIQ_SIGNAL = "15"   # no_senseiq_signal (bool) True when SenseIQ has no
                                # signal (no baby detected / "scanning crib")
 DPS_DEVICE_ERRORS = "18"       # device_errors   (value) 0 = no error
